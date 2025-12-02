@@ -1,4 +1,4 @@
-name: 更新 mrs（永不翻车核弹版）
+name: 更新 mrs（终极无敌版）
 
 on:
   workflow_dispatch:
@@ -18,20 +18,14 @@ permissions:
   contents: write
 
 jobs:
-  # 第一步：统一下载 clash_meta 内核（只跑一次，所有 job 共享）
+  # 第一步：只下载一次 clash_meta 内核，所有 job 共享
   download-kernel:
     runs-on: ubuntu-latest
-    outputs:
-      cache-key: ${{ steps.cache.outputs.cache-key }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: 缓存 + 下载 Clash Meta 内核（只下一次）
-        id: cache
+      - name: 下载并准备 Clash Meta 内核
         run: |
-          CACHE_KEY="clash_meta_v1.19.17_$(date +%s)"
-          echo "cache-key=$CACHE_KEY" >> $GITHUB_OUTPUT
-          
           URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.17/mihomo-linux-amd64-v1.19.17.gz"
           wget -q "$URL" || wget -q "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.17/mihomo-linux-amd64-compatible-v1.19.17.gz"
           FILENAME=$(ls *.gz)
@@ -40,20 +34,19 @@ jobs:
           mv "${FILENAME%.gz}" clash_meta
           echo "Clash Meta 内核已准备好"
 
-      - name: 上传 clash_meta 给后面 job 用
+      - name: 上传二进制供后面使用
         uses: actions/upload-artifact@v4
         with:
-          name: clash_meta_binary
+          name: clash_meta
           path: clash_meta
           retention-days: 1
 
-  # 真正干活的 job（全部依赖上面下载好的内核）
-  update-all:
+  # 真正转换 + 提交（用 matrix 自动循环）
+  convert-and-push:
     needs: download-kernel
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rule: [cn_domain-extra, proxy, apple]
         include:
           - rule: cn_domain-extra
             list: cn_domain-extra.list
@@ -64,7 +57,12 @@ jobs:
           - rule: apple
             list: apple.list
             mrs: apple.mrs
-    # 只有点了 all 或者点了具体这个，才跑
+          # 以后加新规则就在这里继续加一行，例如：
+          # - rule: netflix
+          #   list: netflix.list
+          #   mrs: netflix.mrs
+
+    # 只有选了 all 或者选了具体这个才跑
     if: >
       github.event.inputs.target == 'all' || 
       github.event.inputs.target == '${{ matrix.rule }}'
@@ -72,40 +70,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 下载前面缓存的 clash_meta 二进制
+      - name: 下载 clash_meta 二进制
         uses: actions/download-artifact@v4
         with:
-          name: clash_meta_binary
+          name: clash_meta
 
       - name: 赋予执行权限
         run: chmod +x clash_meta
 
-      - name: 检查并生成 ${{ matrix.mrs }}
+      - name: 生成 ${{ matrix.mrs }}
+        id: convert
         run: |
           if [ -f "${{ matrix.list }}" ]; then
-            echo "${{ matrix.list }} 存在 → 开始生成 ${{ matrix.mrs }}"
+            echo "找到 ${{ matrix.list }} → 开始生成 ${{ matrix.mrs }}"
             ./clash_meta convert-ruleset domain text "${{ matrix.list }}" "${{ matrix.mrs }}"
-            echo "生成成功！"
+            echo "converted=true" >> $GITHUB_OUTPUT
           else
             echo "跳过：${{ matrix.list }} 不存在（正常）"
-            # 不 exit 0，直接继续，让 workflow 保持绿色
           fi
 
-      - name: 提交 ${{ matrix.mrs }}（如果生成了才提交）
-        if: success() && contains(steps.*.outputs.*, '生成成功')
+      # 修复 commit 消息 + 只在真正生成时提交
+      - name: 提交 ${{ matrix.mrs }}（完美显示文件名+时间）
+        if: steps.convert.outputs.converted == 'true'
         run: |
-          if [ -f "${{ matrix.mrs }}" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -f "${{ matrix.mrs }}"
-            git commit -m "chore: update ${{ matrix.mrs }} $(date -u +%Y-%m-%d %H:%M)" || echo "no change"
-            git push origin main
-          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f "${{ matrix.mrs }}"
+          git commit --author="github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>" \
+                     -m "chore: update ${{ matrix.mrs }} $(date -u '+%Y-%m-%d %H:%M')"
+          git push origin main
 
-  # 最终提示（一个文件都没找到时）
-  nothing:
-    needs: [download-kernel, update-all]
-    if: always() && (needs.update-all.result == 'skipped' || needs.update-all.result == 'success' && !contains(needs.update-all.outputs.*, '生成成功'))
+  # 一个文件都没找到时的友好提示
+  nothing-to-do:
+    needs: [download-kernel, convert-and-push]
+    if: always() && needs.convert-and-push.result == 'skipped'
     runs-on: ubuntu-latest
     steps:
       - run: echo "一个可用的 .list 文件都没找到，啥也没干～（正常现象）"
