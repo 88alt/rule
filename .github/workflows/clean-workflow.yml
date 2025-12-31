@@ -12,6 +12,7 @@ on:
         description: "要清理的仓库（格式：owner/repo，多个用逗号分隔，留空为当前仓库，输入 'all' 清理所有仓库）"
         required: false
         default: ""
+
 jobs:
   cleanup:
     runs-on: ubuntu-latest
@@ -80,18 +81,23 @@ jobs:
           echo "repositories=$ALL_REPOS" >> $GITHUB_OUTPUT
           echo "🔍 共找到 $REPO_COUNT 个仓库"
 
-      - name: 过滤有workflow文件的仓库（修复版）
+      - name: 过滤有workflow文件的仓库（安全版）
         if: steps.set-repos.outputs.mode == 'all'
         id: filter-workflow-repos
         run: |
-          echo "🔍 过滤有 .github/workflows/ 文件的仓库（更准确）..."
+          echo "🔍 过滤有 .github/workflows/ 文件的仓库（安全版）..."
          
+          # 初始化变量
           IFS=',' read -ra ALL_REPOS <<< "${{ steps.get-all-repos.outputs.repositories }}"
           ACTIVE_REPOS=""
           CHECKED_COUNT=0
           TOTAL_TO_CHECK=${#ALL_REPOS[@]}
          
           echo "📊 总共需要检查 $TOTAL_TO_CHECK 个仓库"
+         
+          # 设置错误处理 - 即使单个仓库检查失败，也不退出整个脚本
+          set +e
+          trap 'echo "处理仓库时发生错误，继续下一个..."' ERR
          
           for REPO in "${ALL_REPOS[@]}"; do
             ((CHECKED_COUNT++))
@@ -102,42 +108,24 @@ jobs:
            
             HAS_WORKFLOW=0
            
-            # 获取仓库信息（默认分支），添加错误处理
-            REPO_INFO=$(curl -s -H "Authorization: token ${{ secrets.AUTH_PAT }}" \
-                         "https://api.github.com/repos/$REPO" 2>/dev/null || echo '{"message":"error"}')
+            # 简化检查逻辑 - 直接检查是否有workflows目录，不关心具体分支
+            WORKFLOWS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.AUTH_PAT }}" \
+                              "https://api.github.com/repos/$REPO/contents/.github/workflows")
            
-            if echo "$REPO_INFO" | jq -e '.id' > /dev/null 2>&1; then
-              DEFAULT_BRANCH=$(echo "$REPO_INFO" | jq -r '.default_branch // "main"')
-             
-              if [ -n "$DEFAULT_BRANCH" ] && [ "$DEFAULT_BRANCH" != "null" ]; then
-                WORKFLOWS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.AUTH_PAT }}" \
-                                   "https://api.github.com/repos/$REPO/contents/.github/workflows?ref=$DEFAULT_BRANCH" 2>/dev/null || echo '{"message":"error"}')
-               
-                RESPONSE_TYPE=$(echo "$WORKFLOWS_RESPONSE" | jq -r 'type // "null"' 2>/dev/null)
-               
-                if [ "$RESPONSE_TYPE" = "array" ] || [ "$RESPONSE_TYPE" = "dir" ]; then
-                  HAS_WORKFLOW=1
-                fi
-              fi
-             
-              # 尝试常见分支
-              if [ "$HAS_WORKFLOW" -eq 0 ]; then
-                for BRANCH in main master; do
-                  if [ -z "$DEFAULT_BRANCH" ] || [ "$BRANCH" != "$DEFAULT_BRANCH" ]; then
-                    WORKFLOWS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.AUTH_PAT }}" \
-                                       "https://api.github.com/repos/$REPO/contents/.github/workflows?ref=$BRANCH" 2>/dev/null || echo '{"message":"error"}')
-                   
-                    RESPONSE_TYPE=$(echo "$WORKFLOWS_RESPONSE" | jq -r 'type // "null"' 2>/dev/null)
-                   
-                    if [ "$RESPONSE_TYPE" = "array" ] || [ "$RESPONSE_TYPE" = "dir" ]; then
-                      HAS_WORKFLOW=1
-                      break
-                    fi
-                  fi
-                done
-              fi
+            # 检查响应是否是数组（目录有内容）或对象（空目录）
+            if echo "$WORKFLOWS_RESPONSE" | jq -e '.type == "dir" or type == "array"' >/dev/null 2>&1; then
+              HAS_WORKFLOW=1
             else
-              echo " ⚠️ 无法访问仓库 $REPO（跳过过滤）"
+              # 如果主分支没有，尝试常见分支
+              for BRANCH in main master; do
+                WORKFLOWS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.AUTH_PAT }}" \
+                                  "https://api.github.com/repos/$REPO/contents/.github/workflows?ref=$BRANCH" 2>/dev/null || echo "{}")
+               
+                if echo "$WORKFLOWS_RESPONSE" | jq -e '.type == "dir" or type == "array"' >/dev/null 2>&1; then
+                  HAS_WORKFLOW=1
+                  break
+                fi
+              done
             fi
            
             if [ "$HAS_WORKFLOW" -eq 1 ]; then
@@ -147,8 +135,12 @@ jobs:
               echo " ⏭️ $REPO 无 workflow 文件，跳过"
             fi
            
-            sleep 0.3
+            sleep 0.2
           done
+         
+          # 恢复错误处理
+          set -e
+          trap - ERR
          
           ACTIVE_REPOS=${ACTIVE_REPOS%,}
           ACTIVE_COUNT=0
