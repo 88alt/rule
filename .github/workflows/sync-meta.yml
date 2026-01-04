@@ -1,59 +1,178 @@
-# 文件名: .github/workflows/cleanup-binary-files.yml
-# 运行一次，然后就可以删除这个文件
+# 文件名: .github/workflows/sync-meta-folders.yml
+# 日常使用的同步工作流
 
-name: Cleanup Binary Files
+name: Sync Meta Folders Only
 
 on:
+  schedule:
+    - cron: '0 3,15 * * *'  # 北京时间 11:00 和 23:00
   workflow_dispatch:
+    inputs:
+      force_sync:
+        description: '强制同步（即使无变化）'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions:
   contents: write
 
 jobs:
-  cleanup:
+  sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
 
-      - name: Setup environment
+      - name: Setup Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Remove binary .dat files
+      - name: Create or ensure meta directory
         run: |
-          echo "删除不需要的二进制文件..."
-          
-          # 删除所有 .dat 文件
-          if ls meta/*.dat 1> /dev/null 2>&1; then
-            echo "找到以下 .dat 文件:"
-            ls -la meta/*.dat
-            
-            # 删除它们
-            rm -f meta/*.dat
-            echo "✅ 已删除所有 .dat 文件"
-          else
-            echo "没有找到 .dat 文件"
-          fi
-          
-          # 显示剩余的文件结构
-          echo "清理后的 meta 目录结构:"
-          ls -la meta/
+          mkdir -p meta
+          echo "确保 meta 目录存在"
 
-      - name: Commit and push if changes
+      - name: Clone source repository
+        id: clone_source
         run: |
-          # 检查是否有更改
+          SOURCE_DIR="/tmp/meta-source-$(date +%s)"
+          echo "source_dir=$SOURCE_DIR" >> $GITHUB_OUTPUT
+          
+          echo "克隆源仓库 meta 分支..."
+          git clone --depth=1 --branch=meta https://github.com/MetaCubeX/meta-rules-dat.git "$SOURCE_DIR"
+          
+          echo "源仓库结构:"
+          ls -la "$SOURCE_DIR/"
+
+      - name: Check for changes (dry-run)
+        id: check_changes
+        if: github.event.inputs.force_sync == 'false'
+        run: |
+          SOURCE_DIR="${{ steps.clone_source.outputs.source_dir }}"
+          
+          echo "检查是否有变化（dry-run模式）..."
+          
+          # 使用 rsync 的 dry-run 模式检查变化
+          CHANGES=$(rsync -avn \
+            --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            "$SOURCE_DIR/" "meta/" 2>/dev/null | grep -E "^[^.]" | wc -l)
+          
+          if [ "$CHANGES" -gt 0 ]; then
+            echo "发现 $CHANGES 个变化"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "没有变化"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync folders (only if changes or forced)
+        id: sync_folders
+        if: |
+          github.event.inputs.force_sync == 'true' ||
+          steps.check_changes.outputs.has_changes == 'true'
+        run: |
+          SOURCE_DIR="${{ steps.clone_source.outputs.source_dir }}"
+          
+          echo "同步文件夹..."
+          
+          # 使用 rsync 同步，排除 .git 和 .github 目录
+          rsync -av \
+            --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            "$SOURCE_DIR/" "meta/"
+          
+          echo "✅ 同步完成"
+          
+          # 显示同步后的结构
+          echo "同步后的 meta 目录结构:"
+          ls -la meta/
+          
+          # 统计文件夹数量
+          FOLDER_COUNT=$(find meta -maxdepth 1 -type d 2>/dev/null | tail -n +2 | wc -l)
+          echo "文件夹数量: $FOLDER_COUNT"
+          echo "folder_count=$FOLDER_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Remove any .dat files (just in case)
+        if: steps.sync_folders.outputs.folder_count
+        run: |
+          echo "确保没有 .dat 文件..."
+          
+          # 删除任何 .dat 文件（确保与源仓库完全一致）
+          if find meta -name "*.dat" -type f 2>/dev/null | grep -q .; then
+            echo "发现 .dat 文件，删除..."
+            find meta -name "*.dat" -type f -delete
+            echo "✅ 已删除 .dat 文件"
+          else
+            echo "没有 .dat 文件"
+          fi
+
+      - name: Check for git changes
+        id: check_git
+        if: steps.sync_folders.outputs.folder_count
+        run: |
+          echo "检查 Git 变化..."
+          
           git add meta
           
           if git diff --cached --quiet; then
-            echo "没有更改需要提交"
+            echo "没有 Git 变化"
+            echo "has_git_changes=false" >> $GITHUB_OUTPUT
           else
-            echo "提交更改..."
-            git commit -m "🧹 清理：删除不需要的二进制文件 (.dat)"
-            git push origin main
-            echo "✅ 已清理并提交"
+            CHANGED_COUNT=$(git diff --cached --name-only | wc -l)
+            echo "有 $CHANGED_COUNT 个文件变化"
+            echo "has_git_changes=true" >> $GITHUB_OUTPUT
+            echo "changed_count=$CHANGED_COUNT" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push changes
+        if: steps.check_git.outputs.has_git_changes == 'true'
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          CHANGED_COUNT="${{ steps.check_git.outputs.changed_count }}"
+          
+          COMMIT_MSG="🔄 同步 MetaCubeX meta 文件夹
+          
+          同步源仓库的文件夹结构，保持与源仓库一致。
+          
+          详细信息:
+          - 源仓库: MetaCubeX/meta-rules-dat@meta
+          - 同步时间: $TIMESTAMP
+          - 变化文件数: $CHANGED_COUNT
+          - 文件夹数: ${{ steps.sync_folders.outputs.folder_count }}
+          
+          由 GitHub Actions 自动同步"
+          
+          git commit -m "$COMMIT_MSG"
+          git push origin main
+          
+          echo "✅ 已提交并推送"
+
+      - name: No changes needed
+        if: |
+          (github.event.inputs.force_sync == 'false' &&
+           steps.check_changes.outputs.has_changes == 'false') ||
+          (steps.sync_folders.outputs.folder_count && 
+           steps.check_git.outputs.has_git_changes == 'false')
+        run: |
+          echo "🎉 已是最新版本，无需更新"
+          echo "当前 meta 目录结构:"
+          ls -la meta/
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "清理临时目录..."
+          SOURCE_DIR="${{ steps.clone_source.outputs.source_dir }}"
+          if [ -n "$SOURCE_DIR" ] && [ -d "$SOURCE_DIR" ]; then
+            rm -rf "$SOURCE_DIR"
           fi
