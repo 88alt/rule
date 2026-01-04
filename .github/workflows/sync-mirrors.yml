@@ -2,11 +2,11 @@ name: Sync Mirror Repositories
 
 on:
   schedule:
-    - cron: '30 2,14 * * *'  # UTC时间，对应北京时间10:30和22:30
-  workflow_dispatch:          # 允许手动触发
+    - cron: '30 2,14 * * *'  # UTC时间
+  workflow_dispatch:
   push:
     branches:
-      - main                 # main分支有推送时也触发
+      - main
 
 jobs:
   sync-mirror:
@@ -14,83 +14,73 @@ jobs:
     timeout-minutes: 30
     
     steps:
-      - name: 检查仓库状态
-        id: check
-        run: |
-          echo "=== 镜像同步任务开始 $(date '+%Y-%m-%d %H:%M:%S') ==="
-          echo "事件类型: ${{ github.event_name }}"
-          echo "触发者: ${{ github.actor }}"
-
-      - name: 生成SSH密钥并配置
+      - name: 设置SSH密钥对（两对独立密钥）
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           
-          # 从GitHub Secrets读取私钥
-          echo "${{ secrets.MIRROR_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
+          # 写入第一对密钥（用于timeflysoon仓库）
+          echo "${{ secrets.SSH_PRIVATE_KEY_T }}" > ~/.ssh/id_ed25519_t
+          chmod 600 ~/.ssh/id_ed25519_t
           
-          # 配置SSH主机别名
+          # 写入第二对密钥（用于88alt仓库）
+          echo "${{ secrets.SSH_PRIVATE_KEY_X1 }}" > ~/.ssh/id_ed25519_x1
+          chmod 600 ~/.ssh/id_ed25519_x1
+          
+          # 配置SSH主机别名，每个仓库使用不同的密钥
           cat >> ~/.ssh/config << 'EOF'
-          Host github.com
-            HostName github.com
-            User git
-            IdentityFile ~/.ssh/id_ed25519
-            StrictHostKeyChecking no
-            LogLevel ERROR
-          
+          # timeflysoon仓库专用配置
           Host github-t
             HostName github.com
             User git
-            IdentityFile ~/.ssh/id_ed25519
+            IdentityFile ~/.ssh/id_ed25519_t
             StrictHostKeyChecking no
-            LogLevel ERROR
+            IdentitiesOnly yes
           
+          # 88alt仓库专用配置
           Host github-x1
             HostName github.com
             User git
-            IdentityFile ~/.ssh/id_ed25519
+            IdentityFile ~/.ssh/id_ed25519_x1
             StrictHostKeyChecking no
-            LogLevel ERROR
+            IdentitiesOnly yes
           EOF
           
           # 添加GitHub到已知主机
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
           
-          # 测试SSH连接
-          echo "测试SSH连接到GitHub..."
-          ssh -T git@github.com 2>&1 | grep -v "successfully authenticated" || true
+          echo "SSH密钥配置完成"
+          echo "密钥文件列表："
+          ls -la ~/.ssh/
+          
+          # 测试密钥连接（可选，帮助调试）
+          echo "测试SSH密钥连接..."
+          ssh -T git@github.com 2>&1 | head -5 || true
 
-      - name: 配置Git用户
+      - name: 配置Git
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
           git config --global credential.helper cache
-          git config --global core.sshCommand "ssh -F ~/.ssh/config"
           git config --global init.defaultBranch main
           git config --global pull.rebase false
 
       - name: 克隆源仓库
         run: |
           echo "正在克隆源仓库..."
+          rm -rf meta-rules-dat.git 2>/dev/null || true
           
-          # 先清理可能存在的旧目录
-          rm -rf meta-rules-dat.git
-          
-          # 克隆源仓库（假设是公开仓库）
+          # ⚠️ 替换为实际的源仓库URL
           SOURCE_REPO="https://github.com/某个开源组织/meta-rules-dat.git"
-          echo "源仓库: $SOURCE_REPO"
+          echo "克隆源仓库: $SOURCE_REPO"
           
           git clone --mirror "$SOURCE_REPO" meta-rules-dat.git
           
-          # 验证克隆
           cd meta-rules-dat.git
-          echo "仓库大小: $(du -sh .)"
-          echo "分支数量: $(git branch -r | wc -l)"
-          echo "标签数量: $(git tag | wc -l)"
-          
-          # 配置源远程仓库
-          git remote set-url origin "$SOURCE_REPO"
+          echo "仓库信息:"
+          echo "  大小: $(du -sh . | cut -f1)"
+          echo "  分支: $(git branch -r | wc -l)"
+          echo "  标签: $(git tag | wc -l)"
 
       - name: 执行镜像同步
         run: |
@@ -98,16 +88,17 @@ jobs:
           
           cd meta-rules-dat.git
           
-          # 目标仓库列表
+          # 配置目标仓库（使用不同的SSH主机别名）
           TARGET_REPOS=(
             "git@github-t:timeflysoon/meta-rules-dat.git"
             "git@github-x1:88alt/meta-rules-dat.git"
           )
           
           echo "=== 开始同步镜像仓库 $(date '+%Y-%m-%d %H:%M:%S') ==="
+          echo "目标仓库数量: ${#TARGET_REPOS[@]}"
           
           # 1. 永久性配置：只抓取分支和标签
-          echo "配置只抓取分支和标签..."
+          echo "配置源仓库只抓取分支和标签..."
           git config --unset-all remote.origin.fetch 2>/dev/null || true
           git config --add remote.origin.fetch '+refs/heads/*:refs/heads/*'
           git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'
@@ -117,7 +108,7 @@ jobs:
           {
               git for-each-ref --format='delete %(refname)' refs/pull 2>/dev/null | \
               git update-ref --stdin 2>/dev/null 2>/dev/null
-          } || echo "无PR引用可清理"
+          } || echo "无本地PR引用可清理"
           
           {
               git for-each-ref --format='delete %(refname)' refs/remotes/origin/pull 2>/dev/null | \
@@ -125,15 +116,14 @@ jobs:
           } || echo "无远程PR引用可清理"
           
           # 3. 获取最新更新
-          echo "获取最新更新..."
+          echo "从源仓库获取最新更新..."
           RETRY_COUNT=0
           MAX_RETRY=3
           
           while [ $RETRY_COUNT -lt $MAX_RETRY ]; do
             if git fetch --prune origin; then
-              echo "✓ 获取成功"
-              FETCHED_COUNT=$(git log --oneline HEAD..origin/HEAD 2>/dev/null | wc -l)
-              echo "新提交数量: $FETCHED_COUNT"
+              FETCHED_COUNT=$(git log --oneline HEAD..origin/HEAD 2>/dev/null | wc -l || echo "0")
+              echo "✓ 获取成功，新提交: $FETCHED_COUNT"
               break
             else
               RETRY_COUNT=$((RETRY_COUNT+1))
@@ -146,33 +136,36 @@ jobs:
             fi
           done
           
-          # 4. 推送到所有目标仓库
+          # 4. 推送到所有目标仓库（每个使用不同的密钥）
           for TARGET_REPO in "${TARGET_REPOS[@]}"; do
-            REPO_NAME=$(echo "$TARGET_REPO" | cut -d'@' -f2 | cut -d':' -f1)
-            echo "推送镜像到: $REPO_NAME"
+            # 提取仓库标识符
+            REPO_HOST=$(echo "$TARGET_REPO" | cut -d'@' -f2 | cut -d':' -f1)
+            REPO_PATH=$(echo "$TARGET_REPO" | cut -d':' -f2 | sed 's/.git$//')
+            echo "=== 推送镜像到: $REPO_HOST:$REPO_PATH ==="
             
-            # 先测试连接
-            echo "测试连接到 $REPO_NAME..."
-            if ! ssh -o ConnectTimeout=10 git@$REPO_NAME 2>&1 | grep -q "successfully authenticated"; then
-              echo "⚠️  SSH连接测试失败，跳过此仓库"
-              continue
+            # 测试SSH连接
+            echo "测试连接到 $REPO_HOST..."
+            if ssh -o ConnectTimeout=5 -T git@$REPO_HOST 2>&1 | grep -q "successfully authenticated"; then
+              echo "✓ SSH连接成功"
+            else
+              echo "⚠️ SSH连接测试无响应（继续尝试推送）"
             fi
             
+            # 推送镜像
             MAX_RETRY=2
             for i in $(seq 1 $MAX_RETRY); do
-              echo "尝试 $i/$MAX_RETRY..."
+              echo "推送尝试 $i/$MAX_RETRY..."
               if git push --mirror "$TARGET_REPO"; then
-                echo "✓ 推送成功"
-                
-                # 记录推送的引用数量
+                # 推送成功后获取统计信息
                 BRANCHES_PUSHED=$(git branch -r | wc -l)
                 TAGS_PUSHED=$(git tag | wc -l)
-                echo "推送统计: $BRANCHES_PUSHED 分支, $TAGS_PUSHED 标签"
+                echo "✓ 推送成功"
+                echo "  推送统计: $BRANCHES_PUSHED 分支, $TAGS_PUSHED 标签"
                 break
               elif [ $i -eq $MAX_RETRY ]; then
                 echo "✗ 推送失败（已达最大重试次数）"
-                # 记录错误但不退出，继续其他仓库
-                echo "::warning::推送 $REPO_NAME 失败"
+                echo "::warning::推送 $REPO_PATH 失败"
+                # 记录失败但不退出，继续尝试其他仓库
                 break
               else
                 echo "推送失败，10秒后重试 ($i/$MAX_RETRY)..."
@@ -183,31 +176,51 @@ jobs:
           
           echo "=== 同步完成 $(date '+%Y-%m-%d %H:%M:%S') ==="
 
-      - name: 清理和通知
+      - name: 清理敏感数据
         if: always()
         run: |
-          echo "=== 任务结束 $(date '+%Y-%m-%d %H:%M:%S') ==="
-          
-          # 清理敏感文件
-          rm -f ~/.ssh/id_ed25519
+          echo "清理SSH密钥文件..."
+          rm -f ~/.ssh/id_ed25519_t
+          rm -f ~/.ssh/id_ed25519_x1
           rm -f ~/.ssh/config
+          rm -rf ~/.ssh/known_hosts
           
-          # 输出摘要
-          echo "任务状态: ${{ job.status }}"
-          echo "运行时间: ${{ job.container.network }}"
+          # 验证清理
+          echo "清理后~/.ssh目录内容:"
+          ls -la ~/.ssh/ 2>/dev/null || echo "~/.ssh目录不存在"
           
-          # 如果是手动触发，显示更多信息
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "手动触发完成!"
-            echo "查看日志: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "✅ 敏感数据清理完成"
+
+      - name: 生成运行报告
+        if: always()
+        run: |
+          echo "## 镜像同步任务报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**运行时间**: $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**任务状态**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**同步目标**: " >> $GITHUB_STEP_SUMMARY
+          echo "- timeflysoon/meta-rules-dat（使用独立密钥T）" >> $GITHUB_STEP_SUMMARY
+          echo "- 88alt/meta-rules-dat（使用独立密钥X1）" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "✅ 同步任务执行成功" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ 同步任务执行失败" >> $GITHUB_STEP_SUMMARY
+            echo "请查看日志排查问题" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: 失败时发送通知
+      - name: 失败通知
         if: failure()
         run: |
-          echo "::error::镜像同步任务失败!"
-          echo "请检查:"
-          echo "1. SSH密钥配置是否正确"
-          echo "2. 目标仓库Deploy Keys是否有写入权限"
-          echo "3. 源仓库URL是否正确"
-          echo "4. 网络连接是否正常"
+          echo "::error::镜像同步任务失败！"
+          echo "请检查以下事项："
+          echo "1. 源仓库URL是否正确：https://github.com/某个开源组织/meta-rules-dat.git"
+          echo "2. SSH密钥是否正确配置："
+          echo "   - 私钥已添加到Actions仓库Secrets"
+          echo "   - 对应公钥已添加到目标仓库Deploy Keys"
+          echo "   - Deploy Keys已开启写入权限"
+          echo "3. 网络连接是否正常"
+          echo "4. 仓库权限是否足够"
