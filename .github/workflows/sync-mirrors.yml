@@ -1,17 +1,13 @@
 name: Sync Mirror Repositories
 
-# 只保留手动触发和定时任务，移除push触发
 on:
   schedule:
-    - cron: '30 2,14 * * *'  # UTC时间：02:30和14:30（北京时间10:30和22:30）
-  workflow_dispatch:          # 允许手动触发（不会在添加文件时自动运行）
+    # UTC时间：18:30 和 06:30，对应北京时间 02:30 和 14:30
+    - cron: '30 18,6 * * *'
+  workflow_dispatch:
     inputs:
-      source_repo:
-        description: '源仓库URL (可选，不填则使用默认)'
-        required: false
-        default: 'https://github.com/metacubex/meta-rules-dat.git'
       force_sync:
-        description: '强制同步 (即使没有更新也执行)'
+        description: '强制同步（即使没有新提交也执行）'
         required: false
         default: 'false'
         type: choice
@@ -29,12 +25,12 @@ jobs:
         run: |
           echo "=== 镜像同步任务启动 ==="
           echo "触发方式: ${{ github.event_name }}"
-          echo "触发时间: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "触发时间: $(date '+%Y-%m-%d %H:%M:%S') UTC"
+          echo "北京时间: $(date -d '+8 hours' '+%Y-%m-%d %H:%M:%S')"
           echo "运行ID: ${{ github.run_id }}"
           
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "手动触发参数:"
-            echo "  - 源仓库: ${{ github.event.inputs.source_repo }}"
             echo "  - 强制同步: ${{ github.event.inputs.force_sync }}"
           fi
 
@@ -74,8 +70,6 @@ jobs:
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
           
           echo "✅ SSH配置完成"
-          echo "私钥文件列表:"
-          ls -la ~/.ssh/id_ed25519_*
 
       - name: 3. 验证SSH连接
         run: |
@@ -114,40 +108,36 @@ jobs:
           
           echo "✅ Git配置完成"
 
-      - name: 5. 确定源仓库URL
-        id: source-repo
-        run: |
-          # 如果是手动触发且有输入参数，使用输入参数
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.source_repo }}" != "" ]]; then
-            SOURCE_REPO="${{ github.event.inputs.source_repo }}"
-            echo "使用手动输入的源仓库: $SOURCE_REPO"
-          else
-            # ⚠️ 这里设置你的默认源仓库URL
-            SOURCE_REPO="https://github.com/metacubex/meta-rules-dat.git"
-            echo "使用默认源仓库: $SOURCE_REPO"
-          fi
-          
-          echo "source_repo=$SOURCE_REPO" >> $GITHUB_ENV
-          echo "::notice::源仓库URL: $SOURCE_REPO"
-
-      - name: 6. 克隆源仓库
+      - name: 5. 克隆源仓库
         run: |
           echo "正在克隆源仓库..."
-          rm -rf meta-rules-dat.git 2>/dev/null || true
           
-          echo "源仓库URL: $source_repo"
+          # 设置源仓库URL（这里是实际的开源仓库）
+          SOURCE_REPO="https://github.com/MetaCubeX/meta-rules-dat.git"
+          echo "源仓库: $SOURCE_REPO"
+          
+          # 记录开始时间
+          CLONE_START=$(date +%s)
           
           # 克隆仓库（设置重试机制）
           MAX_RETRY=3
           for i in $(seq 1 $MAX_RETRY); do
             echo "克隆尝试 $i/$MAX_RETRY..."
-            if git clone --mirror "$source_repo" meta-rules-dat.git; then
-              echo "✅ 克隆成功"
+            
+            # 删除可能存在的旧目录
+            rm -rf meta-rules-dat.git 2>/dev/null || true
+            
+            if git clone --mirror "$SOURCE_REPO" meta-rules-dat.git; then
+              # 记录结束时间
+              CLONE_END=$(date +%s)
+              CLONE_DURATION=$((CLONE_END - CLONE_START))
+              
+              echo "✅ 克隆成功，耗时: ${CLONE_DURATION}秒"
               break
             elif [ $i -eq $MAX_RETRY ]; then
               echo "❌ 克隆失败（已达最大重试次数）"
-              echo "错误: 无法克隆源仓库，请检查URL是否正确"
-              echo "URL: $source_repo"
+              echo "错误: 无法克隆源仓库，请检查URL是否正确或网络连接"
+              echo "URL: $SOURCE_REPO"
               exit 1
             else
               echo "克隆失败，10秒后重试 ($i/$MAX_RETRY)..."
@@ -155,28 +145,18 @@ jobs:
             fi
           done
           
-          cd meta-rules-dat.git
-          echo "仓库信息:"
-          echo "  分支数量: $(git branch -r | wc -l 2>/dev/null || echo '0')"
-          echo "  标签数量: $(git tag | wc -l 2>/dev/null || echo '0')"
-          echo "  最近提交: $(git log --oneline -1 2>/dev/null || echo '无提交记录')"
-
-      - name: 7. 执行镜像同步
-        run: |
-          set -e
-          
+          # 进入仓库目录
           cd meta-rules-dat.git
           
-          echo "=== 开始同步镜像仓库 $(date '+%Y-%m-%d %H:%M:%S') ==="
+          # 应用关键配置
+          echo "应用Git配置规则..."
           
-          # 永久性配置：只抓取分支和标签
-          echo "配置源仓库只抓取分支和标签..."
+          # 1. 永久性配置：只抓取分支和标签
           git config --unset-all remote.origin.fetch 2>/dev/null || true
           git config --add remote.origin.fetch '+refs/heads/*:refs/heads/*'
           git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'
           
-          # 清理历史遗留的PR引用
-          echo "清理PR引用..."
+          # 2. 清理历史遗留的PR引用（第一次克隆时通常没有，但为了安全）
           {
               git for-each-ref --format='delete %(refname)' refs/pull 2>/dev/null | \
               git update-ref --stdin 2>/dev/null
@@ -187,27 +167,32 @@ jobs:
               git update-ref --stdin 2>/dev/null
           } 2>/dev/null || echo "无远程PR引用可清理"
           
-          # 获取最新更新
-          echo "从源仓库获取最新更新..."
+          # 3. 获取最新更新（实际上刚克隆完，这一步可能不需要，但为了统一流程）
+          echo "获取最新更新..."
           if git fetch --prune origin; then
             echo "✅ 获取成功"
-            
-            # 检查是否有新内容需要推送
-            if git log --oneline HEAD..origin/HEAD 2>/dev/null | head -5; then
-              echo "有新的提交需要同步"
-            else
-              if [[ "${{ github.event.inputs.force_sync }}" == "true" ]]; then
-                echo "⚠️ 没有新提交，但强制同步模式已开启"
-              else
-                echo "✅ 源仓库没有新提交，跳过同步"
-                echo "如果需要强制同步，请手动触发并选择'强制同步: true'"
-                exit 0
-              fi
-            fi
           else
             echo "❌ 获取失败"
             exit 1
           fi
+          
+          # 输出仓库信息
+          echo "仓库信息:"
+          echo "  分支数量: $(git branch -r | wc -l 2>/dev/null || echo '0')"
+          echo "  标签数量: $(git tag | wc -l 2>/dev/null || echo '0')"
+          echo "  最近提交: $(git log --oneline -1 2>/dev/null || echo '无提交记录')"
+          echo "  仓库大小: $(du -sh . | cut -f1)"
+          
+          cd ..
+
+      - name: 6. 执行镜像同步
+        run: |
+          set -e
+          
+          cd meta-rules-dat.git
+          
+          echo "=== 开始同步镜像仓库 $(date '+%Y-%m-%d %H:%M:%S') UTC ==="
+          echo "北京时间: $(date -d '+8 hours' '+%Y-%m-%d %H:%M:%S')"
           
           # 目标仓库列表
           TARGET_REPOS=(
@@ -216,22 +201,24 @@ jobs:
           )
           
           # 推送到所有目标仓库
+          SYNC_START_TIME=$(date +%s)
+          
           for TARGET_REPO in "${TARGET_REPOS[@]}"; do
             REPO_HOST=$(echo "$TARGET_REPO" | cut -d'@' -f2 | cut -d':' -f1)
             REPO_PATH=$(echo "$TARGET_REPO" | cut -d':' -f2)
             
             echo "=== 推送镜像到: $REPO_HOST/$REPO_PATH ==="
             
-            # 记录开始时间
-            START_TIME=$(date +%s)
+            # 记录单个仓库开始时间
+            REPO_START_TIME=$(date +%s)
             
             MAX_RETRY=2
             for i in $(seq 1 $MAX_RETRY); do
               echo "推送尝试 $i/$MAX_RETRY..."
               if git push --mirror "$TARGET_REPO"; then
                 # 计算推送时间
-                END_TIME=$(date +%s)
-                DURATION=$((END_TIME - START_TIME))
+                REPO_END_TIME=$(date +%s)
+                REPO_DURATION=$((REPO_END_TIME - REPO_START_TIME))
                 
                 # 统计推送内容
                 BRANCHES_COUNT=$(git branch -r | wc -l)
@@ -239,7 +226,7 @@ jobs:
                 
                 echo "✅ 推送成功"
                 echo "  推送统计: $BRANCHES_COUNT 个分支, $TAGS_COUNT 个标签"
-                echo "  推送耗时: ${DURATION}秒"
+                echo "  推送耗时: ${REPO_DURATION}秒"
                 break
               elif [ $i -eq $MAX_RETRY ]; then
                 echo "❌ 推送失败（已达最大重试次数）"
@@ -253,9 +240,15 @@ jobs:
             done
           done
           
-          echo "=== 同步完成 $(date '+%Y-%m-%d %H:%M:%S') ==="
+          # 计算总同步时间
+          SYNC_END_TIME=$(date +%s)
+          TOTAL_DURATION=$((SYNC_END_TIME - SYNC_START_TIME))
+          
+          echo "=== 同步完成 $(date '+%Y-%m-%d %H:%M:%S') UTC ==="
+          echo "北京时间: $(date -d '+8 hours' '+%Y-%m-%d %H:%M:%S')"
+          echo "总同步耗时: ${TOTAL_DURATION}秒"
 
-      - name: 8. 清理敏感数据
+      - name: 7. 清理敏感数据
         if: always()
         run: |
           echo "清理SSH密钥文件..."
@@ -266,7 +259,7 @@ jobs:
           
           echo "✅ 敏感数据清理完成"
 
-      - name: 9. 生成运行报告
+      - name: 8. 生成运行报告
         if: always()
         run: |
           echo "## 🚀 镜像同步任务报告" >> $GITHUB_STEP_SUMMARY
@@ -274,33 +267,44 @@ jobs:
           
           # 基本运行信息
           echo "### 📊 运行概览" >> $GITHUB_STEP_SUMMARY
-          echo "- **运行时间**: $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          echo "- **运行时间 (UTC)**: $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
+          echo "- **北京时间**: $(date -d '+8 hours' '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
           echo "- **触发方式**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **任务状态**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "- **运行ID**: [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # 源仓库信息
-          echo "### 📦 源仓库信息" >> $GITHUB_STEP_SUMMARY
-          echo "- **URL**: \`${{ env.source_repo }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **源仓库**: [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # 同步目标
           echo "### 🎯 同步目标" >> $GITHUB_STEP_SUMMARY
           echo "| 仓库 | SSH密钥 | 状态 |" >> $GITHUB_STEP_SUMMARY
           echo "|------|---------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| timeflysoon/meta-rules-dat | 密钥T | 待执行 |" >> $GITHUB_STEP_SUMMARY
-          echo "| 88alt/meta-rules-dat | 密钥X1 | 待执行 |" >> $GITHUB_STEP_SUMMARY
+          echo "| timeflysoon/meta-rules-dat | 密钥T | 待同步 |" >> $GITHUB_STEP_SUMMARY
+          echo "| 88alt/meta-rules-dat | 密钥X1 | 待同步 |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
+          # 执行结果
+          echo "### 📋 执行结果" >> $GITHUB_STEP_SUMMARY
+          
           if [[ "${{ job.status }}" == "success" ]]; then
-            echo "### ✅ 执行结果" >> $GITHUB_STEP_SUMMARY
-            echo "所有镜像同步完成！" >> $GITHUB_STEP_SUMMARY
+            echo "**状态**: ✅ 同步成功" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "所有目标仓库已成功同步最新内容。" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**注意**: 每次运行都会完整克隆源仓库，确保数据一致性。" >> $GITHUB_STEP_SUMMARY
           else
-            echo "### ❌ 执行结果" >> $GITHUB_STEP_SUMMARY
+            echo "**状态**: ❌ 同步失败" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
             echo "镜像同步任务失败，请查看上方日志排查问题。" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "常见问题:" >> $GITHUB_STEP_SUMMARY
+            echo "1. 源仓库URL是否正确" >> $GITHUB_STEP_SUMMARY
+            echo "2. SSH密钥配置是否正确" >> $GITHUB_STEP_SUMMARY
+            echo "3. 目标仓库Deploy Keys是否有写入权限" >> $GITHUB_STEP_SUMMARY
+            echo "4. 网络连接是否正常" >> $GITHUB_STEP_SUMMARY
           fi
           
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "*报告生成时间: $(date '+%Y-%m-%d %H:%M:%S')*" >> $GITHUB_STEP_SUMMARY
+          echo "*报告生成时间 (UTC): $(date '+%Y-%m-%d %H:%M:%S')*" >> $GITHUB_STEP_SUMMARY
+          echo "*报告生成时间 (北京时间): $(date -d '+8 hours' '+%Y-%m-%d %H:%M:%S')*" >> $GITHUB_STEP_SUMMARY
