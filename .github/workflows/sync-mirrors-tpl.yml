@@ -1,0 +1,268 @@
+name: Universal Repo Mirror Sync
+
+on:
+  schedule:
+    # UTC时间：18:30 和 06:30，对应北京时间 02:30 和 14:30
+    - cron: '30 18,6 * * *'
+  workflow_dispatch:  # 手动触发
+    inputs:
+      source_repo:
+        description: '源仓库地址 (格式：owner/repo)'
+        required: true
+        default: 'MetaCubeX/meta-rules-dat'
+      target_repo_1:
+        description: '目标仓库1地址 (格式：owner/repo)'
+        required: true
+        default: 'timeflysoon/meta-rules-dat'
+      target_repo_2:
+        description: '目标仓库2地址 (格式：owner/repo)'
+        required: true
+        default: '88alt/meta-rules-dat'
+
+jobs:
+  sync-mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: 1. 显示运行信息与参数
+        run: |
+          echo "=== 通用镜像同步任务启动 ==="
+          echo "触发方式: ${{ github.event_name }}"
+          echo "触发时间 (UTC): $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "北京时间: $(date -d '+8 hours' '+%Y-%m-%d %H:%M:%S')"
+          echo "运行ID: ${{ github.run_id }}"
+          echo ""
+          echo "配置参数:"
+          echo "  源仓库 : ${{ github.event.inputs.source_repo }}"
+          echo "  目标仓库1: ${{ github.event.inputs.target_repo_1 }}"
+          echo "  目标仓库2: ${{ github.event.inputs.target_repo_2 }}"
+
+      - name: 2. 设置SSH密钥对（动态适配）
+        run: |
+          echo "配置SSH环境（动态适配目标仓库）..."
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          # 动态生成目标仓库列表和映射关系
+          TARGET_1_OWNER=$(echo "${{ github.event.inputs.target_repo_1 }}" | cut -d'/' -f1)
+          TARGET_2_OWNER=$(echo "${{ github.event.inputs.target_repo_2 }}" | cut -d'/' -f1)
+          
+          # 写入对应的私钥（Secrets名称需与仓库所有者对应，如 SSH_PRIVATE_KEY_OWNER）
+          echo "${{ secrets.SSH_PRIVATE_KEY_T }}" > ~/.ssh/id_$TARGET_1_OWNER
+          echo "${{ secrets.SSH_PRIVATE_KEY_X1 }}" > ~/.ssh/id_$TARGET_2_OWNER
+          chmod 600 ~/.ssh/id_$TARGET_1_OWNER ~/.ssh/id_$TARGET_2_OWNER
+          
+          # 动态生成SSH配置
+          cat > ~/.ssh/config << EOF
+          # 目标仓库1配置
+          Host github-$TARGET_1_OWNER
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_$TARGET_1_OWNER
+            IdentitiesOnly yes
+            StrictHostKeyChecking no
+          
+          # 目标仓库2配置
+          Host github-$TARGET_2_OWNER
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_$TARGET_2_OWNER
+            IdentitiesOnly yes
+            StrictHostKeyChecking no
+          EOF
+          
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          
+          echo "✅ SSH配置完成"
+          echo "已为以下仓库创建配置："
+          echo "  - ${{ github.event.inputs.target_repo_1 }} (密钥: ~/.ssh/id_$TARGET_1_OWNER)"
+          echo "  - ${{ github.event.inputs.target_repo_2 }} (密钥: ~/.ssh/id_$TARGET_2_OWNER)"
+
+      - name: 3. 验证SSH连接
+        run: |
+          echo "验证SSH密钥连接..."
+          
+          TARGET_1_OWNER=$(echo "${{ github.event.inputs.target_repo_1 }}" | cut -d'/' -f1)
+          TARGET_2_OWNER=$(echo "${{ github.event.inputs.target_repo_2 }}" | cut -d'/' -f1)
+          
+          # 测试第一个密钥
+          echo "测试 $TARGET_1_OWNER 仓库连接..."
+          if ssh -T git@github-$TARGET_1_OWNER 2>&1 | grep -q "$TARGET_1_OWNER"; then
+            echo "✅ 密钥 $TARGET_1_OWNER 连接成功"
+          else
+            echo "❌ 密钥 $TARGET_1_OWNER 连接失败"
+            exit 1
+          fi
+          
+          # 测试第二个密钥
+          echo "测试 $TARGET_2_OWNER 仓库连接..."
+          if ssh -T git@github-$TARGET_2_OWNER 2>&1 | grep -q "$TARGET_2_OWNER"; then
+            echo "✅ 密钥 $TARGET_2_OWNER 连接成功"
+          else
+            echo "❌ 密钥 $TARGET_2_OWNER 连接失败"
+            exit 1
+          fi
+          
+          echo "所有SSH连接验证通过"
+
+      - name: 4. 配置Git
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git config --global core.sshCommand "ssh -F ~/.ssh/config"
+          git config --global init.defaultBranch main
+          echo "✅ Git配置完成"
+
+      - name: 5. 克隆源仓库
+        run: |
+          echo "正在克隆源仓库..."
+          
+          SOURCE_REPO="https://github.com/${{ github.event.inputs.source_repo }}.git"
+          echo "源仓库URL: $SOURCE_REPO"
+          
+          CLONE_START=$(date +%s)
+          
+          MAX_RETRY=3
+          for i in $(seq 1 $MAX_RETRY); do
+            echo "克隆尝试 $i/$MAX_RETRY..."
+            
+            rm -rf source-repo.git 2>/dev/null || true
+            
+            if git clone --mirror "$SOURCE_REPO" source-repo.git; then
+              CLONE_END=$(date +%s)
+              CLONE_DURATION=$((CLONE_END - CLONE_START))
+              echo "✅ 克隆成功，耗时: ${CLONE_DURATION}秒"
+              break
+            elif [ $i -eq $MAX_RETRY ]; then
+              echo "❌ 克隆失败（已达最大重试次数）"
+              exit 1
+            else
+              echo "克隆失败，10秒后重试 ($i/$MAX_RETRY)..."
+              sleep 10
+            fi
+          done
+          
+          cd source-repo.git
+          
+          echo "应用Git配置规则..."
+          git config --unset-all remote.origin.fetch 2>/dev/null || true
+          git config --add remote.origin.fetch '+refs/heads/*:refs/heads/*'
+          git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'
+          
+          {
+              git for-each-ref --format='delete %(refname)' refs/pull 2>/dev/null | \
+              git update-ref --stdin 2>/dev/null
+          } 2>/dev/null || echo "无本地PR引用可清理"
+          
+          {
+              git for-each-ref --format='delete %(refname)' refs/remotes/origin/pull 2>/dev/null | \
+              git update-ref --stdin 2>/dev/null
+          } 2>/dev/null || echo "无远程PR引用可清理"
+          
+          echo "获取最新更新..."
+          git fetch --prune origin
+          
+          echo "仓库信息:"
+          echo "  分支: $(git branch -r | wc -l)"
+          echo "  标签: $(git tag | wc -l)"
+          echo "  大小: $(du -sh . | cut -f1)"
+          
+          cd ..
+
+      - name: 6. 执行镜像同步
+        run: |
+          set -e
+          
+          cd source-repo.git
+          
+          echo "=== 开始同步镜像仓库 $(date '+%Y-%m-%d %H:%M:%S') UTC ==="
+          
+          TARGET_1_OWNER=$(echo "${{ github.event.inputs.target_repo_1 }}" | cut -d'/' -f1)
+          TARGET_2_OWNER=$(echo "${{ github.event.inputs.target_repo_2 }}" | cut -d'/' -f1)
+          
+          TARGET_REPOS=(
+            "git@github-$TARGET_1_OWNER:${{ github.event.inputs.target_repo_1 }}.git"
+            "git@github-$TARGET_2_OWNER:${{ github.event.inputs.target_repo_2 }}.git"
+          )
+          
+          SYNC_START_TIME=$(date +%s)
+          
+          for TARGET_REPO in "${TARGET_REPOS[@]}"; do
+            REPO_HOST=$(echo "$TARGET_REPO" | cut -d'@' -f2 | cut -d':' -f1)
+            REPO_PATH=$(echo "$TARGET_REPO" | cut -d':' -f2)
+            
+            echo "=== 推送镜像到: $REPO_PATH ==="
+            
+            REPO_START_TIME=$(date +%s)
+            
+            MAX_RETRY=2
+            for i in $(seq 1 $MAX_RETRY); do
+              echo "推送尝试 $i/$MAX_RETRY..."
+              if git push --mirror "$TARGET_REPO"; then
+                REPO_END_TIME=$(date +%s)
+                REPO_DURATION=$((REPO_END_TIME - REPO_START_TIME))
+                
+                BRANCHES_COUNT=$(git branch -r | wc -l)
+                TAGS_COUNT=$(git tag | wc -l)
+                
+                echo "✅ 推送成功"
+                echo "  分支: $BRANCHES_COUNT, 标签: $TAGS_COUNT, 耗时: ${REPO_DURATION}秒"
+                break
+              elif [ $i -eq $MAX_RETRY ]; then
+                echo "❌ 推送失败（已达最大重试次数）"
+                break
+              else
+                echo "推送失败，10秒后重试 ($i/$MAX_RETRY)..."
+                sleep 10
+              fi
+            done
+          done
+          
+          SYNC_END_TIME=$(date +%s)
+          TOTAL_DURATION=$((SYNC_END_TIME - SYNC_START_TIME))
+          
+          echo "=== 同步完成，总耗时: ${TOTAL_DURATION}秒 ==="
+
+      - name: 7. 清理敏感数据
+        if: always()
+        run: |
+          echo "清理SSH密钥文件..."
+          TARGET_1_OWNER=$(echo "${{ github.event.inputs.target_repo_1 }}" | cut -d'/' -f1)
+          TARGET_2_OWNER=$(echo "${{ github.event.inputs.target_repo_2 }}" | cut -d'/' -f1)
+          rm -f ~/.ssh/id_$TARGET_1_OWNER ~/.ssh/id_$TARGET_2_OWNER
+          rm -f ~/.ssh/config
+          rm -f ~/.ssh/known_hosts
+          echo "✅ 敏感数据清理完成"
+
+      - name: 8. 生成运行报告
+        if: always()
+        run: |
+          echo "## 🚀 通用镜像同步任务报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "**运行信息**:" >> $GITHUB_STEP_SUMMARY
+          echo "- 触发方式: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 运行状态: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 运行ID: [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "**同步配置**:" >> $GITHUB_STEP_SUMMARY
+          echo "- 源仓库: [${{ github.event.inputs.source_repo }}](https://github.com/${{ github.event.inputs.source_repo }})" >> $GITHUB_STEP_SUMMARY
+          echo "- 目标仓库1: [${{ github.event.inputs.target_repo_1 }}](https://github.com/${{ github.event.inputs.target_repo_1 }})" >> $GITHUB_STEP_SUMMARY
+          echo "- 目标仓库2: [${{ github.event.inputs.target_repo_2 }}](https://github.com/${{ github.event.inputs.target_repo_2 }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "✅ **执行结果**: 同步成功" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "所有目标仓库均已同步最新内容。" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **执行结果**: 同步失败" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "请查看上方日志排查问题。" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "报告生成时间: $(date '+%Y-%m-%d %H:%M:%S') UTC" >> $GITHUB_STEP_SUMMARY
