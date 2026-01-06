@@ -1,7 +1,7 @@
-# 文件名: .github/workflows/sync-meta-folders.yml
+# 文件名: .github/workflows/sync-meta.yml
 # 日常使用的同步工作流 - 与源仓库完全一致
 
-name: Sync Meta Folders Only
+name: Sync Meta Folders
 
 on:
   schedule:
