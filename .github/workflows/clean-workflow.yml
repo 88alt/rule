@@ -1,7 +1,9 @@
 name: Cleanup Workflow Runs
 on:
   schedule:
-    - cron: '0 0 * * 0' # 每周日0点运行
+    # 每周日北京时间 0 点自动运行
+    - cron: '0 0 * * 0'
+      timezone: Asia/Shanghai
   workflow_dispatch:
     inputs:
       keep_days:
