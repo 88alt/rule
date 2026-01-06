@@ -7,7 +7,7 @@ on:
   schedule:
     - cron: '30 18 * * *'  # UTC 18:30 = 北京时间第二天 2:30
     - cron: '30 6 * * *'   # UTC 6:30 = 北京时间 14:30
-  workflow_dispatch:  # 手动触发，不需要输入参数
+  workflow_dispatch:  # 手动触发
 
 permissions:
   contents: write
@@ -15,24 +15,19 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5  # 更短的超时时间，应该1分钟内完成
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 1
+          fetch-depth: 1  # 只拉取最新提交，加快速度
 
       - name: Setup Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Create or ensure meta directory
-        run: |
-          mkdir -p meta
-          echo "确保 meta 目录存在"
 
       - name: Clone source repository
         id: clone_source
@@ -40,21 +35,24 @@ jobs:
           SOURCE_DIR="/tmp/meta-source-$(date +%s)"
           echo "source_dir=$SOURCE_DIR" >> $GITHUB_OUTPUT
           
-          echo "克隆源仓库 meta 分支..."
+          echo "📥 克隆源仓库 meta 分支..."
           git clone --depth=1 --branch=meta https://github.com/MetaCubeX/meta-rules-dat.git "$SOURCE_DIR"
           
-          echo "源仓库结构:"
+          echo "源仓库内容:"
           ls -la "$SOURCE_DIR/"
 
-      - name: Sync folders
-        id: sync_folders
+      - name: Sync all files from source
+        id: sync_files
         run: |
           SOURCE_DIR="${{ steps.clone_source.outputs.source_dir }}"
           
-          echo "同步文件夹..."
+          echo "🔄 同步文件..."
           
-          # 使用 rsync 同步，排除 .git 和 .github 目录
-          # --delete 参数确保删除目标目录中源目录没有的文件
+          # 确保 meta 目录存在
+          mkdir -p meta
+          
+          # 使用 rsync 同步所有文件（覆盖）
+          # 注意：这里使用 -c 参数可以基于校验和跳过相同文件，但考虑到文件数量不多，直接覆盖更简单
           rsync -av \
             --delete \
             --exclude='.git' \
@@ -64,122 +62,116 @@ jobs:
           echo "✅ 同步完成"
           
           # 显示同步后的结构
-          echo "同步后的 meta 目录结构:"
+          echo "同步结果:"
           ls -la meta/
-          
-          # 统计文件夹数量
-          FOLDER_COUNT=$(find meta -maxdepth 1 -type d 2>/dev/null | tail -n +2 | wc -l)
-          echo "folder_count=$FOLDER_COUNT" >> $GITHUB_OUTPUT
 
-      - name: Remove any .dat files (just in case)
-        if: steps.sync_folders.outputs.folder_count
+      - name: Remove any .dat files (safety check)
         run: |
-          echo "确保没有 .dat 文件（与源仓库完全一致）..."
+          echo "🔍 检查是否有 .dat 文件..."
           
-          # 删除任何 .dat 文件（确保与源仓库完全一致）
-          # 源仓库没有这些文件，所以我们也不应该有
-          if find meta -name "*.dat" -type f 2>/dev/null | grep -q .; then
-            echo "发现 .dat 文件，正在删除..."
+          # 安全删除任何 .dat 文件（源仓库不应该有这些文件）
+          DAT_FILES=$(find meta -name "*.dat" -type f 2>/dev/null | wc -l)
+          if [ "$DAT_FILES" -gt 0 ]; then
+            echo "发现 $DAT_FILES 个 .dat 文件，正在删除..."
             find meta -name "*.dat" -type f -delete
-            echo "✅ 已删除 .dat 文件"
+            echo "✅ 已清理 .dat 文件"
           else
-            echo "✓ 没有 .dat 文件（正确）"
+            echo "✓ 没有 .dat 文件"
           fi
 
-      - name: Check for git changes
-        id: check_git
+      - name: Check if any changes occurred
+        id: check_changes
         run: |
-          echo "检查 Git 变化..."
+          echo "📊 检查文件变化..."
           
+          # 只添加 meta 目录的变化
           git add meta
           
+          # 检查是否有待提交的更改
           if git diff --cached --quiet; then
-            echo "没有 Git 变化"
-            echo "has_git_changes=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  没有检测到文件变化"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
           else
             CHANGED_COUNT=$(git diff --cached --name-only | wc -l)
-            echo "有 $CHANGED_COUNT 个文件变化"
-            echo "has_git_changes=true" >> $GITHUB_OUTPUT
+            CHANGED_FILES=$(git diff --cached --name-only | head -10)
+            echo "📝 检测到 $CHANGED_COUNT 个文件变化"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
             echo "changed_count=$CHANGED_COUNT" >> $GITHUB_OUTPUT
+            
+            if [ $CHANGED_COUNT -gt 0 ]; then
+              echo "变化文件:"
+              echo "$CHANGED_FILES"
+            fi
           fi
 
-      - name: Commit and push changes
-        if: steps.check_git.outputs.has_git_changes == 'true'
+      - name: Commit and push if changes found
+        if: steps.check_changes.outputs.has_changes == 'true'
         run: |
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          CHANGED_COUNT="${{ steps.check_git.outputs.changed_count }}"
+          CHANGED_COUNT="${{ steps.check_changes.outputs.changed_count }}"
           
           # 判断同步类型
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             SYNC_TYPE="手动同步"
           else
-            SYNC_TYPE="自动同步"
+            SYNC_TYPE="定时同步"
           fi
           
-          COMMIT_MSG="🔄 $SYNC_TYPE: 更新 MetaCubeX meta 文件夹
-          
-          保持与源仓库完全一致，同步所有文件夹和文件。
-          
+          COMMIT_MSG="🔄 $SYNC_TYPE: 更新 Meta 规则文件夹
+
+          保持与源仓库 MetaCubeX/meta-rules-dat@meta 分支完全一致。
+
           详细信息:
-          - 源仓库: MetaCubeX/meta-rules-dat@meta 分支
           - 同步时间: $TIMESTAMP
           - 同步类型: $SYNC_TYPE
           - 变化文件数: $CHANGED_COUNT
-          - 文件夹数: ${{ steps.sync_folders.outputs.folder_count }}
+          - 触发方式: ${{ github.event_name }}
+
+          由 GitHub Actions 自动执行"
           
-          由 GitHub Actions 自动同步"
+          echo "提交信息:"
+          echo "$COMMIT_MSG"
           
           git commit -m "$COMMIT_MSG"
           git push origin main
           
           echo "✅ 已提交并推送更新"
 
-      - name: No changes needed
-        if: steps.check_git.outputs.has_git_changes == 'false'
+      - name: No changes - skip commit
+        if: steps.check_changes.outputs.has_changes == 'false'
         run: |
-          echo "🎉 已是最新版本，无需更新"
-          echo "当前 meta 目录结构:"
-          ls -la meta/
+          echo "🎉 已是最新版本，无需提交"
           echo ""
-          echo "与源仓库完全一致 ✓"
+          echo "当前状态:"
+          echo "- 同步时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "- 触发方式: ${{ github.event_name }}"
+          echo "- 文件状态: 与源仓库完全一致"
+          echo ""
+          echo "下次自动检查: UTC 6:30 和 18:30"
 
-      - name: Cleanup
+      - name: Cleanup temporary files
         if: always()
         run: |
-          echo "清理临时目录..."
+          echo "🧹 清理临时文件..."
           SOURCE_DIR="${{ steps.clone_source.outputs.source_dir }}"
+          
           if [ -n "$SOURCE_DIR" ] && [ -d "$SOURCE_DIR" ]; then
             rm -rf "$SOURCE_DIR"
             echo "✅ 已清理临时目录"
           fi
 
-      - name: Final verification
+      - name: Final summary
         run: |
-          echo "=== 最终验证 ==="
-          echo "同步完成时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "触发方式: ${{ github.event_name }}"
-          echo "同步结果: ${{ steps.check_git.outputs.has_git_changes == 'true' && '✅ 已更新并推送' || 'ℹ️  无变化，无需更新' }}"
+          echo "=== 同步任务完成 ==="
+          echo "完成时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "执行耗时: 约 $SECONDS 秒"
+          echo ""
           
-          if [ -d "meta" ]; then
-            echo "meta 目录内容:"
-            ls -la meta/
-            
-            # 检查是否有 .dat 文件
-            DAT_FILES=$(find meta -name "*.dat" -type f 2>/dev/null | wc -l)
-            if [ "$DAT_FILES" -eq 0 ]; then
-              echo "✅ 验证通过: 没有 .dat 文件（与源仓库一致）"
-            else
-              echo "⚠️  警告: 发现 $DAT_FILES 个 .dat 文件"
-            fi
-            
-            # 显示文件夹和文件统计
-            FOLDER_COUNT=$(find meta -maxdepth 1 -type d 2>/dev/null | tail -n +2 | wc -l)
-            FILE_COUNT=$(find meta -type f 2>/dev/null | wc -l)
-            echo "📁 文件夹数: $FOLDER_COUNT"
-            echo "📄 文件总数: $FILE_COUNT"
+          if [ "${{ steps.check_changes.outputs.has_changes }}" = "true" ]; then
+            echo "✅ 结果: 已同步并提交 ${{ steps.check_changes.outputs.changed_count }} 个文件更新"
           else
-            echo "❌ 错误: meta 目录不存在"
+            echo "ℹ️  结果: 无变化，无需提交"
           fi
           
           echo ""
-          echo "=== 工作流执行完成 ==="
+          echo "任务状态: 完成 ✓"
