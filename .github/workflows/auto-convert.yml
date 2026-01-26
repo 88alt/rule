@@ -2,11 +2,10 @@ name: 自动转换 list → mrs
 
 on:
   push:
+    branches: [ main ]
     paths:
       - 'cn_domain-extra.list'
       - 'proxy-extra.list'
-      - 'cn_domain-extra.mrs'      # 新增：删了 mrs 也能自动重建
-      - 'proxy-extra.mrs'          # 新增
   workflow_dispatch:
     inputs:
       target:
@@ -28,6 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # 保持 fetch-depth: 0 以确保 git diff 正常工作
           fetch-depth: 0
 
       - name: 下载 Clash Meta 内核（防 404）
@@ -39,9 +39,18 @@ jobs:
           chmod +x "${FILENAME%.gz}"
           mv "${FILENAME%.gz}" clash_meta
 
+      # ============ 确定转换目标（使用 Bash 默认值语法简化）============
+      - name: 确定转换目标
+        id: set-target
+        run: |
+          # 使用bash变量默认值语法：如果input为空则设为both
+          SELECTED_TARGET="${{ github.event.inputs.target }}"
+          echo "TARGET=${SELECTED_TARGET:-both}" >> $GITHUB_OUTPUT
+          echo "转换目标: ${SELECTED_TARGET:-both}"
+
       # ============ 生成 cn_domain-extra.mrs ============
       - name: 生成 cn_domain-extra.mrs
-        if: inputs.target == 'both' || inputs.target == 'cn_domain-extra'
+        if: steps.set-target.outputs.TARGET == 'both' || steps.set-target.outputs.TARGET == 'cn_domain-extra'
         run: |
           if [ -f cn_domain-extra.list ]; then
             echo "开始转换 cn_domain-extra.list → cn_domain-extra.mrs"
@@ -53,7 +62,7 @@ jobs:
 
       # ============ 生成 proxy-extra.mrs ============
       - name: 生成 proxy-extra.mrs
-        if: inputs.target == 'both' || inputs.target == 'proxy-extra'
+        if: steps.set-target.outputs.TARGET == 'both' || steps.set-target.outputs.TARGET == 'proxy-extra'
         run: |
           if [ -f proxy-extra.list ]; then
             echo "开始转换 proxy-extra.list → proxy-extra.mrs"
@@ -63,6 +72,11 @@ jobs:
             echo "proxy-extra.list 不存在，跳过"
           fi
 
+      # ============ 清理下载的内核文件 ============
+      - name: 清理 Clash Meta 内核
+        run: |
+          rm -f clash_meta
+
       # ============ 终极智能提交：只有真正变化才 push（最简最稳）============
       - name: 智能提交（仅在 mrs 内容真正变化时才 commit + push）
         run: |
@@ -70,7 +84,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M")
-          TARGET="${{ inputs.target }}"
+          TARGET="${{ steps.set-target.outputs.TARGET }}"
 
           # 先把可能变化的文件加入暂存区
           git add cn_domain-extra.mrs proxy-extra.mrs 2>/dev/null || true
@@ -83,7 +97,8 @@ jobs:
           fi
 
           # 到这里说明真的有变化，才提交
-          git commit -m "chore: auto update ruleset(s) $TIMESTAMP (target: $TARGET)"
+          # 加上 [skip ci] 确保这次提交不会再次触发 Actions
+          git commit -m "chore: auto update ruleset(s) $TIMESTAMP (target: $TARGET) [skip ci]"
           git push origin main
           echo "检测到规则内容变更，已成功提交并推送"
           echo "last_run=$TIMESTAMP (updated, target: $TARGET)" >> $GITHUB_ENV
