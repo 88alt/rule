@@ -2,9 +2,8 @@ name: Update All Fork Repositories
 
 on:
   schedule:
-    # 每天北京时间 07:20 和 19:20 自动运行，同步所有fork仓库
-    - cron: '20 7,19 * * *'
-      timezone: Asia/Shanghai
+    # 修正：北京时间 07:20 (UTC 23:20) 和 19:20 (UTC 11:20)
+    - cron: '20 11,23 * * *'
   workflow_dispatch:
     inputs:
       repositories:
@@ -15,6 +14,11 @@ on:
           指定 - owner/repo,owner2/repo2
         required: false
         default: "all"
+
+# 防止并发运行
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -77,13 +81,24 @@ jobs:
         
         while true; do
           echo "获取第 $page 页..."
-          RESPONSE=$(curl -s -H "Authorization: token $GH_TOKEN" \
+          # 获取响应和HTTP状态码
+          RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: token $GH_TOKEN" \
                         "https://api.github.com/user/repos?per_page=100&page=$page&type=owner&sort=full_name")
           
-          # 检查API响应
-          if echo "$RESPONSE" | jq 'type' 2>/dev/null | grep -q "array"; then
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ API 请求失败 (状态码: $HTTP_CODE)"
+            echo "响应: $BODY"
+            # 不退出，继续处理已获取的仓库
+            break
+          fi
+          
+          # 检查响应是否是有效的JSON数组
+          if echo "$BODY" | jq 'type' 2>/dev/null | grep -q "array"; then
             # 提取fork仓库
-            FORK_REPOS=$(echo "$RESPONSE" | jq -r '.[] | select(.fork == true) | .full_name' | tr '\n' ',')
+            FORK_REPOS=$(echo "$BODY" | jq -r '.[] | select(.fork == true) | .full_name' | tr '\n' ',')
             
             if [ -z "$FORK_REPOS" ] || [ "$FORK_REPOS" = "" ]; then
               echo "没有更多fork仓库"
@@ -93,6 +108,13 @@ jobs:
             ALL_FORK_REPOS="${ALL_FORK_REPOS}${FORK_REPOS}"
             REPO_COUNT=$(echo "$FORK_REPOS" | tr ',' '\n' | wc -l)
             echo "第 $page 页找到 $REPO_COUNT 个fork仓库"
+            
+            # 检查是否是最后一页
+            LENGTH=$(echo "$BODY" | jq '. | length')
+            if [ "$LENGTH" -lt 100 ]; then
+              echo "到达最后一页"
+              break
+            fi
             
             page=$((page + 1))
             
@@ -317,10 +339,10 @@ jobs:
           echo "5. **手动触发**：支持多种输入方式" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          echo "### 🔄 下次自动更新时间" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔄 下次自动更新时间 (北京时间)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- 北京时间 03:00（UTC 前一天 19:00）" >> $GITHUB_STEP_SUMMARY
-          echo "- 北京时间 15:00（UTC 当天 07:00）" >> $GITHUB_STEP_SUMMARY
+          echo "- 07:20 (早晨)" >> $GITHUB_STEP_SUMMARY
+          echo "- 19:20 (晚上)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> ⚠️ 注意：定时任务默认同步所有fork仓库，如需修改请在手动触发时指定" >> $GITHUB_STEP_SUMMARY
         else
