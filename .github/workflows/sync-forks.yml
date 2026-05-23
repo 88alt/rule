@@ -261,8 +261,14 @@ jobs:
           case $HTTP_CODE in
             200)
               MERGE_TYPE=$(echo "$RESPONSE_BODY" | jq -r '.merge_type // "fast-forward"' 2>/dev/null || echo "fast-forward")
-              echo "✅ 同步成功 ($MERGE_TYPE)"
-              UPDATED_REPOS=$((UPDATED_REPOS + 1))
+              # 关键修复：当上游无更新返回 none 时，精准划归为已是最新
+              if [ "$MERGE_TYPE" = "none" ]; then
+                echo "⏭️ 已是最新: (无需同步)"
+                UP_TO_DATE_REPOS=$((UP_TO_DATE_REPOS + 1))
+              else
+                echo "✅ 同步成功 ($MERGE_TYPE)"
+                UPDATED_REPOS=$((UPDATED_REPOS + 1))
+              fi
               ;;
             422)
               ERROR_MSG=$(echo "$RESPONSE_BODY" | jq -r '.message // "已是最新"')
@@ -302,13 +308,17 @@ jobs:
         echo "  ✅ 成功同步: $UPDATED_REPOS"
         echo "  ⏭️  已是最新: $UP_TO_DATE_REPOS"
         echo "  🔄 跳过: $SKIPPED_REPOS"
-        echo "  ❌ 失败: $FAILED_REPOS"
-        
+        # 核心修改：控制台输出不论如何都打印行，空值时显示“无”
         if [ -n "$SKIPPED_REPO_NAMES" ]; then
-          echo "🔄 跳过仓库: $SKIPPED_REPO_NAMES"
+          echo "  🔄 跳过仓库: $SKIPPED_REPO_NAMES"
+        else
+          echo "  🔄 跳过仓库: 无"
         fi
+        echo "  ❌ 失败: $FAILED_REPOS"
         if [ -n "$FAILED_REPO_NAMES" ]; then
-          echo "❌ 失败仓库: $FAILED_REPO_NAMES"
+          echo "  ❌ 失败仓库: $FAILED_REPO_NAMES"
+        else
+          echo "  ❌ 失败仓库: 无"
         fi
         
         # 设置常规单行输出
@@ -317,7 +327,7 @@ jobs:
         echo "skipped_repos=$SKIPPED_REPOS" >> $GITHUB_OUTPUT
         echo "failed_repos=$FAILED_REPOS" >> $GITHUB_OUTPUT
         
-        # 核心优化：利用 EOF 机制将超长文本以“多行流”安全写入 GITHUB_OUTPUT，彻底规避超长行限制漏洞
+        # 利用 EOF 机制将文本安全写入 GITHUB_OUTPUT
         echo "skipped_repo_names<<EOF" >> $GITHUB_OUTPUT
         echo "$SKIPPED_REPO_NAMES" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
@@ -357,12 +367,22 @@ jobs:
           echo "| ⏭️ 已是最新 | $UP_TO_DATE_REPOS | 所有分支已是最新 |" >> $GITHUB_STEP_SUMMARY
           echo "| 🔄 跳过 | $SKIPPED_REPOS | 非fork仓库或有冲突 |" >> $GITHUB_STEP_SUMMARY
           echo "| ❌ 失败 | $FAILED_REPOS | 权限或网络问题 |" >> $GITHUB_STEP_SUMMARY
+          
+          # 核心修改：报告表格中永久保留这两行。有值则代码块包裹，无值则直接填入文本“无”
           if [ -n "$SKIPPED_REPO_NAMES" ]; then
-            echo "| 🔄 跳过仓库 | \`$SKIPPED_REPO_NAMES\` | 发生冲突或非fork类型 |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🔄 跳过仓库 | \`$SKIPPED_REPO_NAMES\` | 发生冲突或非fork类型仓库列表 |" >> $GITHUB_STEP_SUMMARY
           fi
+          if [ -z "$SKIPPED_REPO_NAMES" ]; then
+            echo "| 🔄 跳过仓库 | 无 | 发生冲突或非fork类型仓库列表 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           if [ -n "$FAILED_REPO_NAMES" ]; then
-            echo "| ❌ 失败仓库 | \`$FAILED_REPO_NAMES\` | 鉴权失败或网络超时 |" >> $GITHUB_STEP_SUMMARY
+            echo "| ❌ 失败仓库 | \`$FAILED_REPO_NAMES\` | 鉴权失败或网络超时的仓库列表 |" >> $GITHUB_STEP_SUMMARY
           fi
+          if [ -z "$FAILED_REPO_NAMES" ]; then
+            echo "| ❌ 失败仓库 | 无 | 鉴权失败或网络超时的仓库列表 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           echo "| 📦 总计 | $REPO_COUNT | 目标仓库总数 |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
