@@ -261,7 +261,7 @@ jobs:
           case $HTTP_CODE in
             200)
               MERGE_TYPE=$(echo "$RESPONSE_BODY" | jq -r '.merge_type // "fast-forward"' 2>/dev/null || echo "fast-forward")
-              # 关键修复：当上游无更新返回 none 时，精准划归为已是最新
+              # 核心修正：当上游无更新返回 none 时，精准划归为已是最新
               if [ "$MERGE_TYPE" = "none" ]; then
                 echo "⏭️ 已是最新: (无需同步)"
                 UP_TO_DATE_REPOS=$((UP_TO_DATE_REPOS + 1))
@@ -308,7 +308,6 @@ jobs:
         echo "  ✅ 成功同步: $UPDATED_REPOS"
         echo "  ⏭️  已是最新: $UP_TO_DATE_REPOS"
         echo "  🔄 跳过: $SKIPPED_REPOS"
-        # 核心修改：控制台输出不论如何都打印行，空值时显示“无”
         if [ -n "$SKIPPED_REPO_NAMES" ]; then
           echo "  🔄 跳过仓库: $SKIPPED_REPO_NAMES"
         else
@@ -368,19 +367,17 @@ jobs:
           echo "| 🔄 跳过 | $SKIPPED_REPOS | 非fork仓库或有冲突 |" >> $GITHUB_STEP_SUMMARY
           echo "| ❌ 失败 | $FAILED_REPOS | 权限或网络问题 |" >> $GITHUB_STEP_SUMMARY
           
-          # 核心修改：报告表格中永久保留这两行。有值则代码块包裹，无值则直接填入文本“无”
+          # 完美融合版：数字列引入变量，说明列名单包裹自适应。
           if [ -n "$SKIPPED_REPO_NAMES" ]; then
-            echo "| 🔄 跳过仓库 | \`$SKIPPED_REPO_NAMES\` | 发生冲突或非fork类型仓库列表 |" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ -z "$SKIPPED_REPO_NAMES" ]; then
-            echo "| 🔄 跳过仓库 | 无 | 发生冲突或非fork类型仓库列表 |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🔄 跳过仓库 | $SKIPPED_REPOS | \`$SKIPPED_REPO_NAMES\` |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 🔄 跳过仓库 | $SKIPPED_REPOS | 无 |" >> $GITHUB_STEP_SUMMARY
           fi
           
           if [ -n "$FAILED_REPO_NAMES" ]; then
-            echo "| ❌ 失败仓库 | \`$FAILED_REPO_NAMES\` | 鉴权失败或网络超时的仓库列表 |" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ -z "$FAILED_REPO_NAMES" ]; then
-            echo "| ❌ 失败仓库 | 无 | 鉴权失败或网络超时的仓库列表 |" >> $GITHUB_STEP_SUMMARY
+            echo "| ❌ 失败仓库 | $FAILED_REPOS | \`$FAILED_REPO_NAMES\` |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| ❌ 失败仓库 | $FAILED_REPOS | 无 |" >> $GITHUB_STEP_SUMMARY
           fi
           
           echo "| 📦 总计 | $REPO_COUNT | 目标仓库总数 |" >> $GITHUB_STEP_SUMMARY
@@ -389,7 +386,7 @@ jobs:
           echo "### 📝 说明" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "1. **服务器端同步**：使用 GitHub 官方 \`/merge-upstream\` API（网页 'Sync fork' 按钮的底层机制）" >> $GITHUB_STEP_SUMMARY
-          echo "2. **安全无推送**：不会产生 push 事件，不会触发其他仓库的 Actions" >> $GITHUB_STEP_SUMMARY
+          echo "2. **安全无推送**：不会产生 push 事件，不会触发 fork 仓库里的 Action 工作流" >> $GITHUB_STEP_SUMMARY
           echo "3. **极速完成**：纯 API 调用，无克隆操作，40个仓库预计 1-2 分钟内完成" >> $GITHUB_STEP_SUMMARY
           echo "4. **定时任务**：自动同步所有fork仓库的默认分支" >> $GITHUB_STEP_SUMMARY
           echo "5. **手动触发**：支持多种输入方式" >> $GITHUB_STEP_SUMMARY
