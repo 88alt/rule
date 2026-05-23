@@ -175,6 +175,7 @@ jobs:
         echo "repo_count=$REPO_COUNT" >> $GITHUB_OUTPUT
         
     - name: 更新仓库 (API同步 - 核心修复)
+      id: update-repos
       env:
         REPOSITORIES: ${{ steps.prepare-repos.outputs.repositories }}
         GH_TOKEN: ${{ secrets.AUTH_PAT }}
@@ -194,6 +195,8 @@ jobs:
         UP_TO_DATE_REPOS=0
         SKIPPED_REPOS=0
         FAILED_REPOS=0
+        SKIPPED_REPO_NAMES=""
+        FAILED_REPO_NAMES=""
         
         for TARGET_REPO in "${REPO_ARRAY[@]}"; do
           echo ""
@@ -212,13 +215,14 @@ jobs:
           # 1. 检查仓库是否存在且为fork
           echo "🔍 检查仓库信息..."
           REPO_INFO=$(curl -s -H "Authorization: token $GH_TOKEN" \
-                      "https://api.github.com/repos/$TARGET_REPO")
+                        "https://api.github.com/repos/$TARGET_REPO")
           
           ERROR_MSG=$(echo "$REPO_INFO" | jq -r '.message // empty')
           
           if [ -n "$ERROR_MSG" ] && [ "$ERROR_MSG" != "null" ]; then
             echo "❌ 获取仓库信息失败: $ERROR_MSG"
             FAILED_REPOS=$((FAILED_REPOS + 1))
+            FAILED_REPO_NAMES="${FAILED_REPO_NAMES}\"$TARGET_REPO\", "
             continue
           fi
           
@@ -226,6 +230,7 @@ jobs:
           if [ "$IS_FORK" != "true" ]; then
             echo "⚠️ $TARGET_REPO 不是fork仓库，跳过"
             SKIPPED_REPOS=$((SKIPPED_REPOS + 1))
+            SKIPPED_REPO_NAMES="${SKIPPED_REPO_NAMES}\"$TARGET_REPO\", "
             continue
           fi
           
@@ -267,22 +272,29 @@ jobs:
             409)
               echo "⚠️ 存在合并冲突，需要手动解决"
               SKIPPED_REPOS=$((SKIPPED_REPOS + 1))
+              SKIPPED_REPO_NAMES="${SKIPPED_REPO_NAMES}\"$TARGET_REPO\", "
               ;;
             403|404)
               ERROR_MSG=$(echo "$RESPONSE_BODY" | jq -r '.message // "权限或仓库不存在"')
               echo "❌ 同步失败 ($HTTP_CODE): $ERROR_MSG"
               FAILED_REPOS=$((FAILED_REPOS + 1))
+              FAILED_REPO_NAMES="${FAILED_REPO_NAMES}\"$TARGET_REPO\", "
               ;;
             *)
               echo "❓ 未知响应 ($HTTP_CODE)"
               echo "$RESPONSE_BODY"
               FAILED_REPOS=$((FAILED_REPOS + 1))
+              FAILED_REPO_NAMES="${FAILED_REPO_NAMES}\"$TARGET_REPO\", "
               ;;
           esac
           
           # 避免API速率限制
           sleep 0.5
         done
+        
+        # 清理末尾多余的逗号和空格
+        SKIPPED_REPO_NAMES=$(echo "$SKIPPED_REPO_NAMES" | sed 's/, $//')
+        FAILED_REPO_NAMES=$(echo "$FAILED_REPO_NAMES" | sed 's/, $//')
         
         echo ""
         echo "🎉 API 同步完成！"
@@ -292,11 +304,27 @@ jobs:
         echo "  🔄 跳过: $SKIPPED_REPOS"
         echo "  ❌ 失败: $FAILED_REPOS"
         
-        # 设置输出
+        if [ -n "$SKIPPED_REPO_NAMES" ]; then
+          echo "🔄 跳过仓库: $SKIPPED_REPO_NAMES"
+        fi
+        if [ -n "$FAILED_REPO_NAMES" ]; then
+          echo "❌ 失败仓库: $FAILED_REPO_NAMES"
+        fi
+        
+        # 设置常规单行输出
         echo "updated_repos=$UPDATED_REPOS" >> $GITHUB_OUTPUT
         echo "up_to_date_repos=$UP_TO_DATE_REPOS" >> $GITHUB_OUTPUT
         echo "skipped_repos=$SKIPPED_REPOS" >> $GITHUB_OUTPUT
         echo "failed_repos=$FAILED_REPOS" >> $GITHUB_OUTPUT
+        
+        # 核心优化：利用 EOF 机制将超长文本以“多行流”安全写入 GITHUB_OUTPUT，彻底规避超长行限制漏洞
+        echo "skipped_repo_names<<EOF" >> $GITHUB_OUTPUT
+        echo "$SKIPPED_REPO_NAMES" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+        echo "failed_repo_names<<EOF" >> $GITHUB_OUTPUT
+        echo "$FAILED_REPO_NAMES" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
         
     - name: 生成报告
       if: always()
@@ -307,6 +335,8 @@ jobs:
         UP_TO_DATE_REPOS: ${{ steps.update-repos.outputs.up_to_date_repos || 0 }}
         SKIPPED_REPOS: ${{ steps.update-repos.outputs.skipped_repos || 0 }}
         FAILED_REPOS: ${{ steps.update-repos.outputs.failed_repos || 0 }}
+        SKIPPED_REPO_NAMES: ${{ steps.update-repos.outputs.skipped_repo_names || '' }}
+        FAILED_REPO_NAMES: ${{ steps.update-repos.outputs.failed_repo_names || '' }}
       run: |
         echo "## 📊 仓库更新报告" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
@@ -327,12 +357,18 @@ jobs:
           echo "| ⏭️ 已是最新 | $UP_TO_DATE_REPOS | 所有分支已是最新 |" >> $GITHUB_STEP_SUMMARY
           echo "| 🔄 跳过 | $SKIPPED_REPOS | 非fork仓库或有冲突 |" >> $GITHUB_STEP_SUMMARY
           echo "| ❌ 失败 | $FAILED_REPOS | 权限或网络问题 |" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$SKIPPED_REPO_NAMES" ]; then
+            echo "| 🔄 跳过仓库 | \`$SKIPPED_REPO_NAMES\` | 发生冲突或非fork类型 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -n "$FAILED_REPO_NAMES" ]; then
+            echo "| ❌ 失败仓库 | \`$FAILED_REPO_NAMES\` | 鉴权失败或网络超时 |" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "| 📦 总计 | $REPO_COUNT | 目标仓库总数 |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           echo "### 📝 说明" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "1. **服务器端同步**：使用 GitHub 官方 `/merge-upstream` API（网页 'Sync fork' 按钮的底层机制）" >> $GITHUB_STEP_SUMMARY
+          echo "1. **服务器端同步**：使用 GitHub 官方 \`/merge-upstream\` API（网页 'Sync fork' 按钮的底层机制）" >> $GITHUB_STEP_SUMMARY
           echo "2. **安全无推送**：不会产生 push 事件，不会触发其他仓库的 Actions" >> $GITHUB_STEP_SUMMARY
           echo "3. **极速完成**：纯 API 调用，无克隆操作，40个仓库预计 1-2 分钟内完成" >> $GITHUB_STEP_SUMMARY
           echo "4. **定时任务**：自动同步所有fork仓库的默认分支" >> $GITHUB_STEP_SUMMARY
@@ -352,7 +388,7 @@ jobs:
         fi
 
 # ========================================
-# 1、不触发其他仓库的 Actions，直接调用 GitHub 官方API：POST /repos/{owner}/{repo}/merge-upstream，这就是网页上“Sync fork”按钮的底层机制，服务器端直接 fast-forward 或 merge 默认分支，不会产生 push 事件，因此绝对不会触发 fork 仓库里的 on: push workflows。
+# 1、不触发其他仓库的 Actions，直接调用 GitHub 官方API：POST /repos/{owner}/{repo}/merge-upstream，这就是网页上"Sync fork"按钮的底层机制，服务器端直接 fast-forward 或 merge 默认分支，不会产生 push 事件，因此绝对不会触发 fork 仓库里的 on: push workflows。
 # 2、纯API调用，无需任何克隆操作，没有临时目录、没有下载代码，40个仓库仅用 1分8秒。
 # 3、API只在有更新时才修改分支，冲突时自动返回409并跳过，不会强制合并，无更新时返回422"已是最新"。
 # 4、日志超级详细：成功/跳过/失败统计、每仓库状态一目了然，便于监控 Actions 日志。
