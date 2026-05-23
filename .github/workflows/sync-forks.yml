@@ -364,10 +364,8 @@ jobs:
           echo "|------|--------|------|" >> $GITHUB_STEP_SUMMARY
           echo "| ✅ 成功同步 | $UPDATED_REPOS | 通过 GitHub API 同步了上游更新 |" >> $GITHUB_STEP_SUMMARY
           echo "| ⏭️ 已是最新 | $UP_TO_DATE_REPOS | 所有分支已是最新 |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔄 跳过 | $SKIPPED_REPOS | 非fork仓库或有冲突 |" >> $GITHUB_STEP_SUMMARY
-          echo "| ❌ 失败 | $FAILED_REPOS | 权限或网络问题 |" >> $GITHUB_STEP_SUMMARY
           
-          # 完美融合版：数字列引入变量，说明列名单包裹自适应。
+          # 已成功剔除原本冗余的 “🔄 跳过” 和 “❌ 失败” 行
           if [ -n "$SKIPPED_REPO_NAMES" ]; then
             echo "| 🔄 跳过仓库 | $SKIPPED_REPOS | \`$SKIPPED_REPO_NAMES\` |" >> $GITHUB_STEP_SUMMARY
           else
