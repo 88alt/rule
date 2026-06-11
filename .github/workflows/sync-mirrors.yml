@@ -2,7 +2,7 @@ name: Sync Mirror Repositories
 
 on:
   schedule:
-    # 北京时间 07:20 (UTC 前日 23:20) 和 19:20 (UTC 11:20)
+    # 北京时间 07:20 (UTC 前一日 23:20) 和 19:20 (UTC 11:20)
     - cron: '20 11,23 * * *'
   workflow_dispatch:
 
@@ -19,11 +19,9 @@ permissions:
 env:
   SOURCE_REPO: "https://github.com/MetaCubeX/meta-rules-dat.git"
   SOURCE_REPO_NAME: "meta-rules-dat"
-
   TARGET_REPOS: >-
     git@github-timeflysoon:timeflysoon/meta-rules-dat.git
     git@github-88alt:88alt/meta-rules-dat.git
-
   SSH_HOSTS: >-
     github-timeflysoon:SSH_PRIVATE_KEY_TIMEFLYSOON
     github-88alt:SSH_PRIVATE_KEY_88ALT
@@ -44,7 +42,7 @@ jobs:
           echo "北京时间: $(date -u '+%Y-%m-%d %H:%M:%S' -d '+8 hours')"
           echo "源仓库: $SOURCE_REPO"
           echo "目标仓库:"
-          for repo in $TARGET_REPOS; do echo "  - $repo"; done
+          for repo in $TARGET_REPOS; do echo " - $repo"; done
 
       - name: 2. 设置SSH密钥对
         env:
@@ -54,41 +52,36 @@ jobs:
           echo "配置SSH环境..."
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-
           for entry in $SSH_HOSTS; do
             ALIAS="${entry%%:*}"
             SECRET_NAME="${entry##*:}"
             KEY_FILE="$HOME/.ssh/id_ed25519_${ALIAS}"
-
             KEY_VALUE="${!SECRET_NAME}"
             if [ -z "$KEY_VALUE" ]; then
               echo "❌ Secret '$SECRET_NAME' 未配置或为空"
               exit 1
             fi
-
             echo "$KEY_VALUE" > "$KEY_FILE"
             chmod 600 "$KEY_FILE"
-
             cat >> ~/.ssh/config << EOF
           Host ${ALIAS}
             HostName github.com
+            HostKeyAlias github.com
             User git
             IdentityFile ${KEY_FILE}
             IdentitiesOnly yes
-            StrictHostKeyChecking no
-
+            StrictHostKeyChecking yes
           EOF
             echo "✅ 已配置: $ALIAS -> $KEY_FILE"
           done
-
-          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
           echo "✅ SSH配置完成"
 
       - name: 3. 验证SSH连接
         run: |
           echo "验证SSH密钥连接..."
           EXIT_CODE=0
-
           for entry in $SSH_HOSTS; do
             ALIAS="${entry%%:*}"
             echo "测试连接: $ALIAS ..."
@@ -99,7 +92,6 @@ jobs:
               EXIT_CODE=1
             fi
           done
-
           if [ $EXIT_CODE -eq 0 ]; then
             echo "✅ 所有SSH连接验证通过"
           else
@@ -119,12 +111,10 @@ jobs:
           echo "正在克隆源仓库: $SOURCE_REPO"
           CLONE_START=$(date +%s)
           REPO_DIR="${SOURCE_REPO_NAME}.git"
-
           MAX_RETRY=3
           for i in $(seq 1 $MAX_RETRY); do
             echo "克隆尝试 $i/$MAX_RETRY..."
             rm -rf "$REPO_DIR" 2>/dev/null || true
-
             if git clone --mirror "$SOURCE_REPO" "$REPO_DIR"; then
               echo "✅ 克隆成功，耗时: $(($(date +%s) - CLONE_START))秒"
               break
@@ -136,33 +126,27 @@ jobs:
               sleep 10
             fi
           done
-
           cd "$REPO_DIR"
           git config --unset-all remote.origin.fetch 2>/dev/null || true
           git config --add remote.origin.fetch '+refs/heads/*:refs/heads/*'
           git config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'
-
           git for-each-ref --format='delete %(refname)' refs/pull 2>/dev/null | git update-ref --stdin 2>/dev/null || echo "无本地PR引用可清理"
-
           echo "仓库信息:"
-          echo "  分支: $(git branch -r | wc -l)"
-          echo "  标签: $(git tag | wc -l)"
-          echo "  大小: $(du -sh . | cut -f1)"
+          echo " 分支: $(git for-each-ref refs/heads --format='%(refname)' | wc -l)"
+          echo " 标签: $(git for-each-ref refs/tags --format='%(refname)' | wc -l)"
+          echo " 大小: $(du -sh . | cut -f1)"
 
       - name: 6. 执行镜像同步
         id: sync_step
         run: |
           cd "${SOURCE_REPO_NAME}.git"
           echo "=== 开始同步镜像仓库 $(date '+%Y-%m-%d %H:%M:%S') UTC ==="
-
           SYNC_START_TIME=$(date +%s)
           FAIL_COUNT=0
-
           for TARGET_REPO in $TARGET_REPOS; do
             echo "=== 推送镜像到: $TARGET_REPO ==="
             REPO_START_TIME=$(date +%s)
             PUSH_SUCCESS=false
-
             MAX_RETRY=2
             for i in $(seq 1 $MAX_RETRY); do
               echo "推送尝试 $i/$MAX_RETRY..."
@@ -177,15 +161,12 @@ jobs:
                 sleep 10
               fi
             done
-
             if [ "$PUSH_SUCCESS" = false ]; then
               FAIL_COUNT=$((FAIL_COUNT + 1))
               echo "⚠️ 标记此仓库同步失败"
             fi
           done
-
           echo "=== 同步完成，总耗时: $(($(date +%s) - SYNC_START_TIME))秒 ==="
-
           if [ $FAIL_COUNT -gt 0 ]; then
             echo "❌ 有 ${FAIL_COUNT} 个仓库同步失败"
             exit 1
@@ -219,13 +200,11 @@ jobs:
             echo "- $repo" >> $GITHUB_STEP_SUMMARY
           done
           echo "" >> $GITHUB_STEP_SUMMARY
-
           if [[ "${{ steps.sync_step.outcome }}" == "success" ]]; then
             echo "✅ **执行结果**: 同步成功" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **执行结果**: 同步失败，请查看日志排查问题" >> $GITHUB_STEP_SUMMARY
           fi
-
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "报告生成时间: $(date '+%Y-%m-%d %H:%M:%S') UTC" >> $GITHUB_STEP_SUMMARY
