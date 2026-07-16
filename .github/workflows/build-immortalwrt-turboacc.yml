@@ -229,7 +229,7 @@ jobs:
             libyaml-dev libz-dev lld llvm lrzsz mkisofs ninja-build p7zip p7zip-full \
             patch pkgconf python3 python3-pip python3-ply python3-docutils \
             qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
-            uglifyjs unzip vim wget xxd zlib1g-dev zstd
+            uglifyjs unzip vim wget xxd zip zlib1g-dev zstd
 
       - name: Clone ImmortalWrt source
         run: |
@@ -389,6 +389,33 @@ jobs:
             -iname "*fullconenat*" \
           \) -exec cp -f {} artifact/packages/ \;
 
+          # 规范化改名：主包/中文包 upstream(add_turboacc.sh 每次 curl 下载
+          # 的最新版本) 的版本号写法不稳定(观察到过 "luci-app-turboacc-0.apk"
+          # 这种没有正经版本号的命名)，与其去 patch upstream Makefile 赌
+          # 版本号格式(那是在制造新的上游依赖风险，不是消除)，不如在产物
+          # 层面统一改名成固定文件名。
+          #
+          # 安全性说明：apk/ipk 包管理器识别一个包靠的是包内部的
+          # control/metadata(包名、版本、依赖关系都封装在包内)，不是文件名
+          # 本身，所以这里对文件名做重命名，对 apk add / opkg install 的
+          # 安装行为没有任何影响——只是让下游查找逻辑不用再去猜 upstream
+          # 这次到底用了什么版本号写法。
+          #
+          # 用 mv 而不是额外再复制一份：如果同一个包在目录里同时存在
+          # "原始版本号命名" 和 "规范化命名" 两份文件，装的时候
+          # apk add ./*.apk 会把它当成两个不同的包尝试重复安装，
+          # 所以规范化之后旧文件名必须消失，只保留一份。
+          for CANON_NAME in "luci-app-turboacc" "luci-i18n-turboacc-zh-cn"; do
+            SRC=$(find artifact/packages -maxdepth 1 -type f -iname "${CANON_NAME}[-_]*" | head -n1 || true)
+            if [ -n "$SRC" ]; then
+              EXT="${SRC##*.}"
+              mv -f "$SRC" "artifact/packages/${CANON_NAME}.${EXT}"
+              echo "已规范化改名: $SRC -> artifact/packages/${CANON_NAME}.${EXT}"
+            else
+              echo "::warning::未找到 ${CANON_NAME} 对应的产物文件，跳过规范化改名(后续 Bundle 步骤会做硬校验)"
+            fi
+          done
+
           find artifact -type f | sort
 
       - name: Clone makeself (pinned release, not tracking a moving branch)
@@ -407,19 +434,12 @@ jobs:
           # 校验(用户在路由器上执行时，文件传输损坏会被直接拦下来，而不是
           # 等 tar 解压到一半才报个不明所以的错)，比自己维护提取逻辑更稳。
           #
-          # 包名匹配同时兼容 apk 和 ipk 两种命名格式：
-          #   - apk (较新分支默认):  luci-app-turboacc-0.apk           (连字符)
-          #   - ipk (传统格式):      luci-app-turboacc_1.0_x86_64.ipk  (下划线)
-          # 早期版本这里只匹配下划线写法，导致 apk 格式下包明明已经生成，
-          # 却因为 glob 匹配不上而被误判为"缺失"、直接中止打包。
-          MAIN_PKG=$(find artifact/packages -maxdepth 1 -type f \( \
-            -iname "luci-app-turboacc_*" -o \
-            -iname "luci-app-turboacc-*" \
-          \) | head -n1 || true)
-          I18N_PKG=$(find artifact/packages -maxdepth 1 -type f \( \
-            -iname "luci-i18n-turboacc-zh-cn_*" -o \
-            -iname "luci-i18n-turboacc-zh-cn-*" \
-          \) | head -n1 || true)
+          # 主包/中文包在上一步"Organize build output"里已经被规范化改名成
+          # 固定文件名(luci-app-turboacc.apk 或 .ipk / 同理中文包)，这里
+          # 直接按固定名找，不用再去猜 upstream 这次用的是什么版本号写法
+          # (apk 的 "-0" 连字符命名 还是 ipk 的 "_版本_架构" 下划线命名)。
+          MAIN_PKG=$(find artifact/packages -maxdepth 1 -type f -iname "luci-app-turboacc.*" | head -n1 || true)
+          I18N_PKG=$(find artifact/packages -maxdepth 1 -type f -iname "luci-i18n-turboacc-zh-cn.*" | head -n1 || true)
           KMOD_COUNT=$(find artifact/packages -maxdepth 1 -type f -iname "kmod-*" | wc -l)
 
           # 缺主包/中文包直接硬失败(::error:: + exit 1)，不允许静默跳过。
@@ -550,10 +570,27 @@ jobs:
           mv "$INSTALLER" artifact/packages/
           ls -lh "artifact/packages/$INSTALLER"
 
+      - name: Package as zip
+        run: |
+          set -euxo pipefail
+          # 统一打成单一 zip 文件，文件名固定为
+          # immortalwrt-<分支>-<matrix.name>-turboacc.zip，跟矩阵条目一一
+          # 对应。GitHub Actions 的 upload-artifact 本身也会在下载时自动
+          # 打 zip，但那个 zip 名字是 Actions 平台生成的，不受我们控制；
+          # 这里自己显式打一个命名规范的 zip，是为了让脚本化下载(比如用
+          # gh CLI 或 API 批量拉取多个平台产物)时能直接按可预期的文件名
+          # 处理，不用再解析 Actions 页面上的 artifact 名称。
+          ZIP_NAME="immortalwrt-${{ env.REPO_BRANCH }}-${{ matrix.name }}-turboacc.zip"
+          (cd artifact && zip -r "../$ZIP_NAME" .)
+
+          echo "zip 内容清单："
+          unzip -l "$ZIP_NAME"
+          ls -lh "$ZIP_NAME"
+
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-${{ env.REPO_BRANCH }}-${{ matrix.name }}-turboacc
-          path: artifact/
+          path: immortalwrt-${{ env.REPO_BRANCH }}-${{ matrix.name }}-turboacc.zip
           retention-days: 7
           if-no-files-found: error
