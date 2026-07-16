@@ -23,7 +23,7 @@ on:
       build_scope:
         description: '编译范围 (按厂商分类, all = 全部代表机型)'
         required: true
-        default: 'all'
+        default: 'x86'
         type: choice
         options:
           - all
