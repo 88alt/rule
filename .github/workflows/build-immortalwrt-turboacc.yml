@@ -4,6 +4,36 @@ name: Build ImmortalWrt Multi-Target TurboACC Packages
 # 选一个代表设备"的构建脚本。同一 subtarget 下所有设备共享内核/kmod ABI，
 # 一个代表设备编出来的 turboacc 相关包对该 subtarget 下所有型号都是通用的。
 #
+# === 2026-07-16 重要修正（用户指出的设计错误，感谢指正）===
+# 之前版本把 kmod-tcp-bbr / kmod-nft-offload / kmod-nft-fullcone 当成了
+# "只有跑了 add_turboacc.sh 才会存在"的产物，因此手写了一整套 makeself
+# 自解压安装包 + 分阶段安装脚本，专门负责把这几个 kmod 跟主包一起打包、
+# 手动分阶段安装。这个前提是错的：这三个 kmod 是 ImmortalWrt 官方为每个
+# target 正常构建、正常发布在标准软件源里的基础包，跟 turboacc fork
+# 完全无关（例如 kmod-tcp-bbr 是主线 Linux BBR 拥塞控制模块，
+# kmod-nft-offload / kmod-nft-fullcone 是 ImmortalWrt 默认就有的 nftables
+# 加速/全锥形NAT 模块，在很多完全没装 turboacc 的设备上都能看到这几个包
+# 出现在已装包列表里）。
+#
+# add_turboacc.sh 真正引入的、官方软件源里没有的东西，只有
+# luci-app-turboacc 和 luci-i18n-turboacc-zh-cn 这两个包本身（LuCI 控制
+# 面板 + 中文语言包）。它们在 Makefile 里用 LUCI_DEPENDS 声明了对
+# kmod-nft-offload 等标准包的依赖，安装时 opkg/apk 会自己去联网软件源解析
+# 并拉取这些依赖——这正是包管理器存在的意义，不需要我们手动模拟依赖解析
+# 逻辑。
+#
+# 因此本版本删除了：makeself 打包步骤、install.sh 分阶段安装脚本、
+# 平台校验/kmod 数量校验/offload 依赖校验这些围绕"手动打包 kmod"而生的
+# 检查。产物精简为只有 luci-app-turboacc 和 luci-i18n-turboacc-zh-cn 两个
+# 包文件，用户在路由器上有网的情况下直接 opkg install *.ipk 或
+# apk add --allow-untrusted ./*.apk 即可，依赖由官方软件源自动解析安装。
+#
+# 唯一仍然成立的边界情况：路由器完全离线、且没有配置任何本地软件源时，
+# opkg/apk 确实无法自动解析 +kmod-xxx 这类依赖。但这属于"用户网络环境
+# 特殊"的范畴，解法是让用户自己额外从官方软件源下载对应 kmod 放在同一
+# 目录一起装（opkg/apk 对同目录多个本地文件的依赖顺序处理没有问题），
+# 而不是本 workflow 常态化地去搜刮/打包这些标准包。
+#
 # 外部依赖风险提示：turboacc 注入脚本(add_turboacc.sh)对内核版本是白名单判断，
 # 目前只接受 6.6 / 6.12 / 6.18。如果 ImmortalWrt 未来某个分支切到其他内核
 # 主线/小版本而上游脚本没更新，"Inject turboacc" 这一步会直接报
@@ -69,6 +99,9 @@ name: Build ImmortalWrt Multi-Target TurboACC Packages
 #
 # 结论：这三个符号已经是从这次真实源码树里读出来的原文，不是猜的，可以
 # 放心显式写死，不再需要运行时动态探测 Config.in（该文件本就不存在）。
+# 这三个符号写死在 .config 里的意义仅仅是：让当次固件编译出来的
+# luci-app-turboacc 包默认勾选这三项加速功能，跟"要不要把 kmod 打包
+# 分发"是两回事——kmod 本身官方软件源已经有了，不需要我们分发。
 
 on:
   workflow_dispatch:
@@ -328,7 +361,7 @@ jobs:
           # package/ 目录塞了东西——如果内核版本超出它的白名单判断范围但
           # 脚本内部没有用 exit 非 0 处理，就会出现"看起来跑完了，实际
           # 什么都没注入"的静默失败。这里直接在源码树里找有没有对应目录，
-          # 而不是等几十分钟后编译完成、打包阶段才靠 kmod 数量去猜。
+          # 而不是等几十分钟后编译完成、打包阶段才靠包数量去猜。
           FOUND=$(find package -maxdepth 3 -type d \( \
             -iname "*turboacc*" -o \
             -iname "*shortcut-fe*" -o \
@@ -359,7 +392,8 @@ jobs:
           if [ -n "$MAKEFILE" ]; then
             echo "文件路径: $MAKEFILE"
             grep -A 20 "PKG_CONFIG_DEPENDS" "$MAKEFILE" || echo "(未找到 PKG_CONFIG_DEPENDS 段)"
-            echo "=== LUCI_DEPENDS(条件依赖，可与上面符号名互相印证) ==="
+            echo "=== LUCI_DEPENDS(条件依赖，声明了运行时依赖的标准 kmod 包，
+            由 opkg/apk 在路由器安装时自动解析拉取，不需要本 workflow 打包) ==="
             grep -A 10 "LUCI_DEPENDS" "$MAKEFILE" || echo "(未找到 LUCI_DEPENDS 段)"
           else
             echo "::error::未找到 luci-app-turboacc 的 Makefile，说明注入结构发生了变化，本次 .config 中硬编码的 CONFIG_PACKAGE_TURBOACC_INCLUDE_* 符号可能已不适用，需要人工核实"
@@ -376,12 +410,10 @@ jobs:
           #
           # 三个符号 FLOW_OFFLOADING / BBR_CCA / FULLCONE 已经从这次真实
           # 注入的 package/turboacc/luci-app-turboacc/Makefile 的
-          # PKG_CONFIG_DEPENDS 原文里核实过，真实前缀是字面量 TURBOACC，
-          # 不是 luci-app-turboacc(那是上一版的错误，实测报
-          # "未生效"，因为该符号名根本不存在)。Config.in 文件本就不存在
-          # (子选项由 LUCI_DEPENDS 的条件依赖语法自动生成)，所以不再对
-          # FULLCONE 做"动态探测、探测不到就跳过硬校验"的处理——三个符号
-          # 统一直接硬编码写死，跟设备选择符号一样做强制校验。
+          # PKG_CONFIG_DEPENDS 原文里核实过，真实前缀是字面量 TURBOACC。
+          # 这三个符号只影响"luci-app-turboacc 这个包默认勾选哪些加速项/
+          # 声明依赖哪些标准 kmod"，并不代表这些 kmod 需要我们手动打包——
+          # 它们本来就是 ImmortalWrt 官方软件源里的标准包。
           {
             echo "CONFIG_TARGET_${{ matrix.target }}=y"
             echo "CONFIG_TARGET_${{ matrix.target }}_${{ matrix.subtarget }}=y"
@@ -421,29 +453,26 @@ jobs:
             exit 1
           fi
 
-          # 硬性校验 FLOW_OFFLOADING / BBR_CCA / FULLCONE：这三个符号名
-          # 已经从这次真实注入的 Makefile 的 PKG_CONFIG_DEPENDS 原文中
-          # 核实(见 Discover 步骤输出)，前缀是字面量 TURBOACC，不是
-          # luci-app-turboacc(上一版用错前缀+错名字"INCLUDE_OFFLOADING"，
-          # 导致这里必然报未生效)。如果被 defconfig 静默丢弃，说明这次
-          # mufeng05 源码树的依赖关系发生了变化，必须提前拦下来，而不是
-          # 等几十分钟后编译完发现 kmod-nft-offload/kmod-tcp-bbr/
-          # kmod-nft-fullcone 缺失(即上一版实测遇到的 KMOD_COUNT=0)。
+          # 以下三项只校验"编译时是否勾选了这三个加速开关"，不代表相应
+          # kmod 需要我们打包分发——它们是 ImmortalWrt 标准软件源里已有的
+          # 包，装 luci-app-turboacc 时 opkg/apk 会自动解析拉取。这里保留
+          # 校验只是为了确认这次固件编出来的 luci-app-turboacc 包默认行为
+          # 符合预期(而不是因为上游 Kconfig 依赖变化被 defconfig 静默丢弃)。
           if ! grep -q "^CONFIG_PACKAGE_TURBOACC_INCLUDE_FLOW_OFFLOADING=y" .config; then
-            echo "::error::CONFIG_PACKAGE_TURBOACC_INCLUDE_FLOW_OFFLOADING=y 未在 .config 中生效，FastPath 引擎(Flow offloading)对应的内核模块不会被编译，请查看 Discover 步骤输出的 Makefile 原文，确认该符号是否仍然存在/依赖是否满足"
+            echo "::error::CONFIG_PACKAGE_TURBOACC_INCLUDE_FLOW_OFFLOADING=y 未在 .config 中生效，请查看 Discover 步骤输出的 Makefile 原文，确认该符号是否仍然存在/依赖是否满足"
             exit 1
           fi
           if ! grep -q "^CONFIG_PACKAGE_TURBOACC_INCLUDE_BBR_CCA=y" .config; then
-            echo "::error::CONFIG_PACKAGE_TURBOACC_INCLUDE_BBR_CCA=y 未在 .config 中生效，BBR 拥塞控制对应的内核模块不会被编译，请查看 Discover 步骤输出的 Makefile 原文，确认该符号是否仍然存在/依赖是否满足"
+            echo "::error::CONFIG_PACKAGE_TURBOACC_INCLUDE_BBR_CCA=y 未在 .config 中生效，请查看 Discover 步骤输出的 Makefile 原文，确认该符号是否仍然存在/依赖是否满足"
             exit 1
           fi
           if ! grep -q "^CONFIG_PACKAGE_TURBOACC_INCLUDE_FULLCONE=y" .config; then
-            echo "::error::CONFIG_PACKAGE_TURBOACC_INCLUDE_FULLCONE=y 未在 .config 中生效，全锥形 NAT1 对应的内核模块不会被编译，请查看 Discover 步骤输出的 Makefile 原文，确认该符号是否仍然存在/依赖是否满足"
+            echo "::error::CONFIG_PACKAGE_TURBOACC_INCLUDE_FULLCONE=y 未在 .config 中生效，请查看 Discover 步骤输出的 Makefile 原文，确认该符号是否仍然存在/依赖是否满足"
             exit 1
           fi
 
           echo "设备与 turboacc 配置校验通过。"
-          echo "下面是当前 .config 中 turboacc 相关的完整配置(用于人工核对 FastPath引擎/全锥形NAT/BBR/硬件流量卸载 这四项默认值是否符合预期)："
+          echo "下面是当前 .config 中 turboacc 相关的完整配置(用于人工核对 FastPath引擎/全锥形NAT/BBR 这几项默认值是否符合预期)："
           grep -i turboacc .config
 
       - name: Download package sources
@@ -478,71 +507,40 @@ jobs:
           # (*.bin/*.itb/*.ubi/*factory* 等)。
           cp -a openwrt/bin/targets/*/* artifact/targets/ 2>/dev/null || true
 
-          # turboacc 相关包：不能只抓 "*turboacc*"，add_turboacc.sh 实际注入的
-          # 是 luci-app-turboacc + shortcut-fe + fullconenat + fullconenat-nft
-          # 四个包目录，内核模块产物(kmod-fast-classifier、kmod-shortcut-fe-cm
-          # 之类)文件名大概率不含 "turboacc" 字样，漏了这些等于只装了个空壳
-          # LuCI 界面，底层加速模块根本没打进去。
+          # turboacc 相关包：只收集 luci-app-turboacc 和
+          # luci-i18n-turboacc-zh-cn 这两个真正的第三方产物本身。
           #
-          # 搜索范围同时包含 bin/packages 和 bin/targets：OpenWrt/ImmortalWrt
-          # 的构建产物分两处存放——bin/packages/<arch>/<feed>/ 放的是跟内核
-          # 版本无关的通用包(luci、base 等)；而 kmod-* 这类跟当前编译内核
-          # vermagic 绑定的内核模块包，只会出现在
-          # bin/targets/<target>/<subtarget>/packages/ 下。只搜 bin/packages
-          # 会导致 kmod-fast-classifier、kmod-shortcut-fe-cm 这些真正干活的
-          # 内核模块被漏掉，装出来的只是一个没有加速能力的 LuCI 空壳。
+          # 不再搜刮 kmod-fast-classifier / kmod-shortcut-fe-cm /
+          # kmod-nft-offload / kmod-tcp-bbr / kmod-nft-fullcone 等文件——
+          # 这些是 ImmortalWrt 官方软件源本来就有的标准包，不是本次编译
+          # 独有的产物，用户在路由器上装包时由 opkg/apk 自动从官方软件源
+          # 解析安装，不需要我们额外打包分发(见文件顶部的修正说明)。
+          #
+          # 搜索范围同时包含 bin/packages 和 bin/targets：不同分支下
+          # luci-app-turboacc 这类跟内核版本无关的包可能出现在
+          # bin/packages/<arch>/<feed>/，也可能因为构建系统版本差异出现在
+          # bin/targets/<target>/<subtarget>/packages/，两处都搜，避免漏掉。
           #
           # 注意：这里不按扩展名过滤(.ipk / .apk 都要)，因为不同分支/不同
           # 内核阶段 ImmortalWrt 实际产出的包格式并不统一(较新分支默认用
           # apk，命名为"包名-版本.apk"；旧分支/ipk 格式为
           # "包名_版本_架构.ipk")，按扩展名过滤会在包管理器切换的分支上
           # 悄悄漏掉产物。
-          #
-          # pattern 说明：fullcone NAT 的内核模块在 nftables 版本下叫
-          # "kmod-nft-fullcone"(没有 "nat" 后缀)，iptables 版本下才叫
-          # "kmod-ipt-fullconenat"/"iptables-mod-fullconenat"(有 "nat")。
-          # 用 "*fullcone*" 这个更宽的 pattern 才能同时兼容两种命名，之前
-          # 用 "*fullconenat*" 会漏掉 nftables 版本的 kmod-nft-fullcone。
-          # "*tcp-bbr*" 对应 turboacc 默认勾选的 BBR 拥塞控制附属功能
-          # (kmod-tcp-bbr)，同样需要显式抓取，否则会被漏掉。
-          #
-          # 教训(实测踩到)：luci-app-turboacc.apk 本身只是 LuCI 控制面板，
-          # 真正的"快速转发引擎"加速能力由它在包 metadata 里声明的依赖
-          # kmod-nft-offload(fw4/nftables) 提供 —— 这是从 Makefile 的
-          # LUCI_DEPENDS 原文里核实的：
-          #   +PACKAGE_TURBOACC_INCLUDE_FLOW_OFFLOADING&&PACKAGE_firewall4:kmod-nft-offload
-          #   +PACKAGE_TURBOACC_INCLUDE_FLOW_OFFLOADING&&PACKAGE_firewall:kmod-ipt-offload
-          # 这个模块文件名不含 turboacc/shortcut-fe/fullcone/tcp-bbr 任何
-          # 关键字，之前的 pattern 会把它漏掉，导致只装 luci-app-turboacc.apk
-          # 时因为离线安装找不到这个依赖而失败("快速转发引擎"这一项等于
-          # 没有)。用 "*nft-offload*" 覆盖 fw4，"*ipt-offload*" 覆盖 fw3，
-          # 两个都要抓，不看当前是 fw3 还是 fw4，让产物本身两种情况都能装。
           find openwrt/bin/packages openwrt/bin/targets -type f \( \
-            -iname "*turboacc*" -o \
-            -iname "*shortcut-fe*" -o \
-            -iname "*fast-classifier*" -o \
-            -iname "*fullcone*" -o \
-            -iname "*tcp-bbr*" -o \
-            -iname "*nft-offload*" -o \
-            -iname "*ipt-offload*" \
+            -iname "luci-app-turboacc[-_]*" -o \
+            -iname "luci-i18n-turboacc-zh-cn[-_]*" \
           \) -exec cp -f {} artifact/packages/ \;
 
-          # 规范化改名：主包/中文包 upstream(add_turboacc.sh 每次 curl 下载
-          # 的最新版本) 的版本号写法不稳定(观察到过 "luci-app-turboacc-0.apk"
-          # 这种没有正经版本号的命名)，与其去 patch upstream Makefile 赌
-          # 版本号格式(那是在制造新的上游依赖风险，不是消除)，不如在产物
-          # 层面统一改名成固定文件名。
+          # 规范化改名：upstream(add_turboacc.sh 每次 curl 下载的最新版本)
+          # 的版本号写法不稳定(观察到过 "luci-app-turboacc-0.apk" 这种没有
+          # 正经版本号的命名)，与其去 patch upstream Makefile 赌版本号格式
+          # (那是在制造新的上游依赖风险，不是消除)，不如在产物层面统一
+          # 改名成固定文件名，方便用户识别，也方便下次运行做 diff 对比。
           #
           # 安全性说明：apk/ipk 包管理器识别一个包靠的是包内部的
           # control/metadata(包名、版本、依赖关系都封装在包内)，不是文件名
           # 本身，所以这里对文件名做重命名，对 apk add / opkg install 的
-          # 安装行为没有任何影响——只是让下游查找逻辑不用再去猜 upstream
-          # 这次到底用了什么版本号写法。
-          #
-          # 用 mv 而不是额外再复制一份：如果同一个包在目录里同时存在
-          # "原始版本号命名" 和 "规范化命名" 两份文件，装的时候
-          # apk add ./*.apk 会把它当成两个不同的包尝试重复安装，
-          # 所以规范化之后旧文件名必须消失，只保留一份。
+          # 安装行为没有任何影响。
           for CANON_NAME in "luci-app-turboacc" "luci-i18n-turboacc-zh-cn"; do
             SRC=$(find artifact/packages -maxdepth 1 -type f -iname "${CANON_NAME}[-_]*" | head -n1 || true)
             if [ -n "$SRC" ]; then
@@ -550,41 +548,25 @@ jobs:
               mv -f "$SRC" "artifact/packages/${CANON_NAME}.${EXT}"
               echo "已规范化改名: $SRC -> artifact/packages/${CANON_NAME}.${EXT}"
             else
-              echo "::warning::未找到 ${CANON_NAME} 对应的产物文件，跳过规范化改名(后续 Bundle 步骤会做硬校验)"
+              echo "::warning::未找到 ${CANON_NAME} 对应的产物文件，跳过规范化改名(后续步骤会做硬校验)"
             fi
           done
 
           find artifact -type f | sort
 
-      - name: Clone makeself (pinned release, not tracking a moving branch)
+      - name: Verify turboacc packages exist
         run: |
           set -euxo pipefail
-          # 钉死到具体 release tag，而不是 clone 默认分支最新代码：
-          # makeself 上游一旦引入 breaking change，我们的 CI 不应该在毫无
-          # 征兆的情况下某天突然坏掉。发现新版本需要的话手动升这个 tag。
-          git clone --depth=1 --branch release-2.7.1 https://github.com/megastep/makeself.git
-
-      - name: Bundle turboacc into a self-extracting run file (makeself)
-        run: |
-          set -euxo pipefail
-          # 不再手搓 marker+tail 的自解压逻辑，改用 makeself：它是被
-          # OpenWrt/嵌入式圈子长期验证过的成熟工具，内置 CRC/SHA256 完整性
-          # 校验(用户在路由器上执行时，文件传输损坏会被直接拦下来，而不是
-          # 等 tar 解压到一半才报个不明所以的错)，比自己维护提取逻辑更稳。
+          # 硬失败：主包/中文包缺失就直接标红，不允许放过去让用户拿到
+          # 一个不完整的 artifact 却毫无提示。
           #
-          # 主包/中文包在上一步"Organize build output"里已经被规范化改名成
-          # 固定文件名(luci-app-turboacc.apk 或 .ipk / 同理中文包)，这里
-          # 直接按固定名找，不用再去猜 upstream 这次用的是什么版本号写法
-          # (apk 的 "-0" 连字符命名 还是 ipk 的 "_版本_架构" 下划线命名)。
+          # 注意：这里不再校验任何 kmod 是否存在——它们不是本次构建要
+          # 分发的产物，路由器安装时由 opkg/apk 自动从官方软件源拉取。
           MAIN_PKG=$(find artifact/packages -maxdepth 1 -type f -iname "luci-app-turboacc.*" | head -n1 || true)
           I18N_PKG=$(find artifact/packages -maxdepth 1 -type f -iname "luci-i18n-turboacc-zh-cn.*" | head -n1 || true)
-          KMOD_COUNT=$(find artifact/packages -maxdepth 1 -type f -iname "kmod-*" | wc -l)
 
-          # 缺主包/中文包直接硬失败(::error:: + exit 1)，不允许静默跳过。
-          # 构建产物不完整应该让本次 job 直接标红，而不是放过去让用户拿到
-          # 一个残次 artifact 却毫无提示。
           if [ -z "$MAIN_PKG" ] || [ -z "$I18N_PKG" ]; then
-            echo "::error::没找到主包(luci-app-turboacc)或中文包(luci-i18n-turboacc-zh-cn)，构建产物不完整，中止打包"
+            echo "::error::没找到主包(luci-app-turboacc)或中文包(luci-i18n-turboacc-zh-cn)，构建产物不完整"
             echo "当前 artifact/packages 目录内容："
             ls -lh artifact/packages/ || true
             exit 1
@@ -592,211 +574,15 @@ jobs:
 
           echo "已找到主包: $MAIN_PKG"
           echo "已找到中文包: $I18N_PKG"
-
-          # 同样硬性校验：一个 kmod 都没找到，大概率是 add_turboacc.sh
-          # 本身在这个内核版本上没有产出 kmod，或者上一步的搜索范围没生效。
-          # 不能让它悄悄流出去变成一个没有加速能力的空壳安装包。
-          if [ "$KMOD_COUNT" -eq 0 ]; then
-            echo "::error::未找到任何 kmod-* 内核模块包，turboacc 的加速能力无法工作，中止打包(请检查 openwrt/bin/targets 下是否真的生成了 kmod，以及 Verify turboacc injection 步骤的输出)"
-            exit 1
-          fi
-
-          # 硬性校验(实测踩到的坑)：luci-app-turboacc.apk 只是 LuCI 控制
-          # 面板，它在 apk metadata 里声明依赖 kmod-nft-offload(fw4) 或
-          # kmod-ipt-offload(fw3) 才能提供"快速转发引擎"这个核心加速能力
-          # (依据 Makefile LUCI_DEPENDS 原文，见上面 Organize build output
-          # 步骤的注释)。这个文件名不含 turboacc/fullcone/tcp-bbr 等关键字，
-          # 早期版本的搜索 pattern 会漏掉它，实测后果是：只单独安装
-          # luci-app-turboacc.apk 时，apk 因为离线找不到这个依赖而装不上，
-          # "快速转发引擎"这一项形同虚设。这里不满足于"有 kmod 就行"的
-          # KMOD_COUNT 判断，必须显式确认 offload 模块存在，否则直接拦下来。
-          OFFLOAD_COUNT=$(find artifact/packages -maxdepth 1 -type f \( -iname "*nft-offload*" -o -iname "*ipt-offload*" \) | wc -l)
-          if [ "$OFFLOAD_COUNT" -eq 0 ]; then
-            echo "::error::未找到 kmod-nft-offload/kmod-ipt-offload，luci-app-turboacc 依赖的快速转发引擎(Flow Offloading)内核模块缺失，仅安装 luci-app-turboacc.apk 会因依赖无法解析而失败，中止打包(请检查 Organize build output 步骤的搜索范围)"
-            exit 1
-          fi
-          echo "已确认快速转发引擎依赖的 offload 内核模块存在(共 $OFFLOAD_COUNT 个)"
-
-          PKGDIR="turboacc-pkg"
-          mkdir -p "$PKGDIR"
-          find artifact/packages -maxdepth 1 -type f \( \
-            -iname "*turboacc*" -o \
-            -iname "*shortcut-fe*" -o \
-            -iname "*fast-classifier*" -o \
-            -iname "*fullcone*" -o \
-            -iname "*tcp-bbr*" -o \
-            -iname "*nft-offload*" -o \
-            -iname "*ipt-offload*" \
-          \) -exec cp -f {} "$PKGDIR/" \;
-
-          echo "本次打进 $PKGDIR 的文件(含 $KMOD_COUNT 个 kmod)："
-          ls -lh "$PKGDIR"
-
-          # install.sh 用带引号的 <<'EOF'，确保 $0/$?/$MAIN_PKG 这些变量
-          # 是字面量原样写进文件，留到路由器上运行时才求值。这里踩过反面
-          # 教材：如果写成不带引号的 <<EOF，$? 会在"生成这个文件的当下"
-          # 就被展开成 CI 里上一条命令的退出码，跟路由器上实际装没装成功
-          # 毫无关系——检查形同虚设。
-          cat > "$PKGDIR/install.sh" <<'EOF'
-          #!/bin/sh
-          # turboacc 安装脚本 (由 makeself 解压后在临时目录里执行，
-          # 当前目录下就是本包除 install.sh 外的全部文件，直接按扩展名
-          # 批量装，不用逐个猜文件名)
-          set -e
-
-          EXPECTED_TARGET="__EXPECTED_TARGET__"
-          EXPECTED_SUBTARGET="__EXPECTED_SUBTARGET__"
-
-          # 平台校验：防止把 A 设备编译的包装到 B 设备上导致驱动/内核
-          # 模块不匹配。/etc/openwrt_release 里的 DISTRIB_TARGET 格式固定
-          # 为 "target/subtarget"，这是 OpenWrt/ImmortalWrt 的标准字段。
-          if [ -f /etc/openwrt_release ]; then
-            . /etc/openwrt_release
-            CUR_TARGET="${DISTRIB_TARGET%%/*}"
-            CUR_SUBTARGET="${DISTRIB_TARGET#*/}"
-            if [ -n "$CUR_TARGET" ] && { [ "$CUR_TARGET" != "$EXPECTED_TARGET" ] || [ "$CUR_SUBTARGET" != "$EXPECTED_SUBTARGET" ]; }; then
-              echo "警告: 当前设备平台为 ${CUR_TARGET}/${CUR_SUBTARGET}，" >&2
-              echo "     本安装包编译目标为 ${EXPECTED_TARGET}/${EXPECTED_SUBTARGET}，两者不匹配。" >&2
-              echo "     继续安装可能导致内核模块加载失败甚至设备无法正常启动。" >&2
-              printf "是否仍要继续安装? [y/N] "
-              read -r ANS
-              case "$ANS" in
-                y|Y) : ;;
-                *) echo "已取消安装"; exit 1 ;;
-              esac
-            fi
-          fi
-
-          # 统计当前目录(makeself 解压出来的临时目录)下的 apk/ipk 数量。
-          # 注意用带路径的通配写法(./xxx)，而不是裸文件名——OpenWrt
-          # 官方已确认 apk add 裸文件名/纯包名会先去联网刷新仓库索引，
-          # 网络不通时会等超时才退回装本地文件(见 openwrt/openwrt#17490)，
-          # 带路径前缀能让 apk 明确识别这是本地文件。
-          APK_COUNT=$(find . -maxdepth 1 -type f -iname '*.apk' | wc -l)
-          IPK_COUNT=$(find . -maxdepth 1 -type f -iname '*.ipk' | wc -l)
-
-          if [ "$APK_COUNT" -gt 0 ] && [ "$IPK_COUNT" -gt 0 ]; then
-            echo "错误: 当前目录同时存在 .apk 和 .ipk，无法判定应该用哪个包管理器" >&2
-            exit 1
-          fi
-
-          echo "本次安装包含以下文件："
-          find . -maxdepth 1 -type f \( -iname '*.apk' -o -iname '*.ipk' \) -exec basename {} \;
-
-          if [ "$APK_COUNT" -gt 0 ]; then
-            if ! command -v apk >/dev/null 2>&1; then
-              echo "错误: 安装包为 apk 格式，但系统未找到 apk 命令" >&2
-              exit 1
-            fi
-            PKGEXT="apk"
-            INSTALL_CMD="apk add --no-network --allow-untrusted"
-          elif [ "$IPK_COUNT" -gt 0 ]; then
-            if ! command -v opkg >/dev/null 2>&1; then
-              echo "错误: 安装包为 ipk 格式，但系统未找到 opkg 命令" >&2
-              exit 1
-            fi
-            PKGEXT="ipk"
-            INSTALL_CMD="opkg install"
-          else
-            echo "错误: 当前目录未找到可安装的 apk/ipk 包，安装中止" >&2
-            exit 1
-          fi
-
-          # 显式分阶段安装，不再把所有文件一股脑丢给 apk/opkg 一次性处理。
-          # 说明：apk 本身是事务型依赖求解器，同一条命令里给的多个文件会
-          # 被当成一个整体一起解出依赖图，理论上不依赖传参顺序；但这里
-          # 仍然按"被依赖方先装、依赖方后装"的顺序显式分三步执行，原因是：
-          #   1. opkg(fw3/ipk 分支) 的依赖解析没有 apk 那么强的事务保证，
-          #      显式顺序对 opkg 是实打实有意义的，两条分支统一按同一套
-          #      显式顺序处理，代码更简单，也不用维护两套不同逻辑。
-          #   2. 分阶段执行后，报错信息能精确定位到"是内核模块装失败，
-          #      还是主程序装失败，还是中文包装失败"，比一次性打包报错
-          #      更容易排查，不用回头去猜是哪个文件的问题。
-          #   3. 分阶段之间加了硬性检查(每阶段失败就地 exit 1)，不会出现
-          #      "内核模块没装上，主程序却装上了"这种半吊子状态被静默放过。
-          #
-          # 阶段一：内核模块(kmod-*)优先装。这些是被依赖方，luci-app-turboacc
-          # 在包 metadata 里声明依赖它们，必须先于主程序存在。kmod 之间彼此
-          # 不互相依赖，用一条 glob 一次装完即可，不需要再拆更细的顺序。
-          KMOD_FILES=$(find . -maxdepth 1 -type f -iname "kmod-*.${PKGEXT}")
-          if [ -n "$KMOD_FILES" ]; then
-            echo "=== 阶段一: 安装内核加速模块 (Flow Offloading / 全锥形NAT / BBR 等) ==="
-            echo "$KMOD_FILES" | xargs -n1 basename
-            # shellcheck disable=SC2086
-            set -- $(find . -maxdepth 1 -type f -iname "kmod-*.${PKGEXT}")
-            if ! $INSTALL_CMD "$@"; then
-              echo "错误: 内核加速模块安装失败，中止(主程序依赖它们，不能继续往下装)" >&2
-              exit 1
-            fi
-          else
-            echo "::warning:: 未找到任何 kmod-* 内核模块文件，快速转发引擎/全锥形NAT/BBR 等加速能力将不可用" >&2
-          fi
-
-          # 阶段二：主程序 luci-app-turboacc，此时它依赖的 kmod 已经装好。
-          MAIN_FILE=$(find . -maxdepth 1 -type f -iname "luci-app-turboacc.${PKGEXT}" | head -n1 || true)
-          if [ -z "$MAIN_FILE" ]; then
-            echo "错误: 未找到 luci-app-turboacc.${PKGEXT}，安装中止" >&2
-            exit 1
-          fi
-          echo "=== 阶段二: 安装主程序 luci-app-turboacc ==="
-          if ! $INSTALL_CMD "$MAIN_FILE"; then
-            echo "错误: luci-app-turboacc 安装失败，中止" >&2
-            exit 1
-          fi
-
-          # 阶段三：中文语言包，依赖主程序已存在(LuCI 语言包挂在主程序的
-          # 菜单结构下)，必须最后装。
-          I18N_FILE=$(find . -maxdepth 1 -type f -iname "luci-i18n-turboacc-zh-cn.${PKGEXT}" | head -n1 || true)
-          if [ -n "$I18N_FILE" ]; then
-            echo "=== 阶段三: 安装中文语言包 ==="
-            if ! $INSTALL_CMD "$I18N_FILE"; then
-              echo "错误: 中文语言包安装失败，中止" >&2
-              exit 1
-            fi
-          else
-            echo "::warning:: 未找到中文语言包，跳过(不影响功能，只是界面显示英文)" >&2
-          fi
-
-          # 阶段四(兜底)：以上三类没有覆盖到的其余 apk/ipk 文件(比如未来
-          # add_turboacc.sh 上游新增了别的组件)，最后统一补装一遍，避免
-          # 因为脚本这边的分类 pattern 没跟上上游变化而被静默漏装。
-          REST_FILES=$(find . -maxdepth 1 -type f -iname "*.${PKGEXT}" \
-            ! -iname "kmod-*" \
-            ! -iname "luci-app-turboacc.${PKGEXT}" \
-            ! -iname "luci-i18n-turboacc-zh-cn.${PKGEXT}")
-          if [ -n "$REST_FILES" ]; then
-            echo "=== 阶段四: 安装其余未分类文件 ==="
-            echo "$REST_FILES" | xargs -n1 basename
-            # shellcheck disable=SC2086
-            set -- $(find . -maxdepth 1 -type f -iname "*.${PKGEXT}" \
-              ! -iname "kmod-*" \
-              ! -iname "luci-app-turboacc.${PKGEXT}" \
-              ! -iname "luci-i18n-turboacc-zh-cn.${PKGEXT}")
-            if ! $INSTALL_CMD "$@"; then
-              echo "错误: 其余文件安装失败，中止" >&2
-              exit 1
-            fi
-          fi
-
-          echo "安装完成，请到 LuCI -> 服务 或 网络 中查看 turboacc"
-          EOF
-
-          # EXPECTED_TARGET/EXPECTED_SUBTARGET 占位符替换成本次矩阵的真实
-          # 值，这一步跟上面 heredoc 的引号无关，纯粹是生成阶段的文本替换。
-          sed -i "s/__EXPECTED_TARGET__/${{ matrix.target }}/; s/__EXPECTED_SUBTARGET__/${{ matrix.subtarget }}/" "$PKGDIR/install.sh"
-          chmod +x "$PKGDIR/install.sh"
-
-          INSTALLER="turboacc-install-${{ matrix.name }}.run"
-          ./makeself/makeself.sh --sha256 "$PKGDIR" "$INSTALLER" "TurboACC installer for ${{ matrix.label }}" ./install.sh
-
-          # 自检：用 makeself 自带的 --check 校验内嵌 SHA256，只验证完整性，
-          # 不会触发 install.sh 真正执行，在 CI 阶段就能发现"打出来的
-          # .run 本身已经损坏"这种问题，而不是等用户在路由器上才发现。
-          sh "$INSTALLER" --check
-          echo "自检通过: $INSTALLER 完整性校验正常"
-
-          mv "$INSTALLER" artifact/packages/
-          ls -lh "artifact/packages/$INSTALLER"
+          echo ""
+          echo "安装方式提示：把这两个文件传到路由器同一目录下，"
+          echo "在路由器有网(能访问 ImmortalWrt 官方软件源)的前提下执行："
+          echo "  apk 分支(较新分支，如 openwrt-25.12): apk add --allow-untrusted ./luci-app-turboacc.apk ./luci-i18n-turboacc-zh-cn.apk"
+          echo "  opkg 分支(较旧分支，如 openwrt-24.10): opkg install ./luci-app-turboacc*.ipk ./luci-i18n-turboacc-zh-cn*.ipk"
+          echo "kmod-tcp-bbr / kmod-nft-offload / kmod-nft-fullcone 等依赖会由"
+          echo "opkg/apk 自动从官方软件源解析并安装，不需要额外操作。"
+          echo "若路由器完全离线且未配置本地软件源，请自行从官方软件源额外"
+          echo "下载对应 kmod 包放在同一目录一并安装。"
 
       - name: Package as zip
         run: |
