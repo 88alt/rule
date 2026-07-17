@@ -16,14 +16,16 @@ name: Build ImmortalWrt Multi-Target TurboACC Packages
 #    里由 LuciTranslation 宏展开出的 Package 段，用的是独立的
 #    PKG_PO_VERSION 变量，必须和 PKG_VERSION 一起显式赋值，
 #    只写一个不会带出另一个。
-# 3) APK v2 是多个串接的 gzip member（signature 段 + control 段
-#    [+ data 段]），.PKGINFO 在 control 段。对整个 .apk 直接
-#    tar -tzf 只会读到第一个 member 就停，永远看不到后面装
-#    .PKGINFO 的 member——不是路径名的问题，是根本没扫描到那一段。
-#    必须用 zlib.decompressobj 按 gzip member 边界手动切分，
-#    每段单独当 tar 解析，直到找到 .PKGINFO 为止。
-# 4) upload-artifact 自身会把上传内容打成 zip 供下载，不要再手动
-#    zip 一层上传，否则下载下来是 zip 套 zip，需要多解一层壳。
+# 3) 校验步骤不能把整个 apk 当成普通单一 tar.gz 直接 tar -tzf。
+#    APK v2 是多个串接的 gzip stream / tar segment，.PKGINFO 在
+#    control 段里。必须按 gzip members 顺序解开，再逐段找 .PKGINFO，
+#    然后读取其中的 "pkgver = " 字段。
+# 4) 单独 make package/.../compile（而非完整固件编译）不会自动
+#    触发 tools/install 和 toolchain/install，staging_dir/host/bin
+#    下的 openssl/sed 等 host 工具会缺失，编译时报 Error 127。
+#    必须在编译目标 package 之前显式跑这两步。
+# 5) upload-artifact 自身会把上传内容打成 zip 供下载，不要再手动
+#    zip 一层上传，否则下载下来是 zip 套 zip。
 
 on:
   workflow_dispatch:
@@ -431,6 +433,17 @@ jobs:
             echo "$BAD_FILES"
             exit 1
           fi
+
+      - name: Prepare host tools and toolchain
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # 单独 make package/.../compile 不会自动触发 tools/toolchain
+          # 构建，staging_dir/host/bin 下的 openssl/sed 等 host 工具
+          # 会缺失，package 编译直接 Error 127。必须显式先跑这两步。
+          make tools/install -j"$(nproc)"
+          make toolchain/install -j"$(nproc)"
 
       - name: Build turboacc packages only
         working-directory: openwrt
