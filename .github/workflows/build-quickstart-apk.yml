@@ -1,0 +1,348 @@
+name: Build Quickstart APK from dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_branch:
+        description: "OpenWrt branch"
+        required: true
+        default: "openwrt-25.12"
+        type: choice
+        options:
+          - openwrt-25.12
+          - openwrt-24.10
+      target_profile:
+        description: "Target profile"
+        required: true
+        default: "x86_64"
+        type: choice
+        options:
+          - x86_64
+          - armsr_armv8
+          - armsr_armv7
+          - rockchip_nanopi_r2s
+          - mediatek_filogic_redmi_ax6000
+          - qualcommax_ipq807x_dl_wrx36
+          - bcm4908_asus_gt_ac5300
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-quickstart-${{ github.event.inputs.openwrt_branch }}-${{ github.event.inputs.target_profile }}
+  cancel-in-progress: false
+
+env:
+  OWRT_REPO: https://github.com/openwrt/openwrt.git
+  OWRT_BRANCH: ${{ github.event.inputs.openwrt_branch }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout current repo (dev)
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h
+
+      - name: Install host dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison \
+            build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler \
+            ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev \
+            gperf help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool \
+            libyaml-dev libz-dev lld llvm lrzsz mkisofs ninja-build p7zip p7zip-full \
+            patch pkgconf python3 python3-pip python3-ply python3-docutils \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip vim wget xxd zip zlib1g-dev zstd jq file binutils
+
+      # 优先读仓库自带 go.mod 里声明的版本，避免以后 go.mod 升级了
+      # 而这里的硬编码版本号忘了同步更新，导致构建环境和开发环境不一致。
+      - name: Setup Go (version from backend/go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+
+      - name: Build quickstart release tarball from dev
+        shell: bash
+        run: |
+          set -euxo pipefail
+          make release
+          ls -lh bin/
+          TAR="$(find bin -maxdepth 1 -type f -name 'quickstart-binary-*.tar.gz' | head -n1)"
+          if [ -z "$TAR" ]; then
+            echo "::error::quickstart release tarball not found"
+            exit 1
+          fi
+          VERSION="$(basename "$TAR" .tar.gz)"
+          VERSION="${VERSION#quickstart-binary-}"
+          echo "QS_TARBALL=$TAR" >> "$GITHUB_ENV"
+          echo "QS_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Detected quickstart version: $VERSION"
+
+      # -------------------------------------------------------------
+      # 修正点 1：真正校验补丁是否编进了产物本身，而不是只看编译有没有
+      # 报错。Go 里 Debugf 这类格式化日志字符串会原样留在二进制的只读
+      # 数据段，strings|grep 能直接命中；命中不了就说明这次改动根本
+      # 没进最终产物，必须在这里就失败，不能拖到后面装到路由器上才
+      # 发现补丁没生效。
+      # -------------------------------------------------------------
+      - name: Verify patch is actually compiled in
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BIN="$(find bin -maxdepth 1 -type f -name 'quickstart.amd64' | head -n1)"
+          if [ -z "$BIN" ]; then
+            echo "::error::找不到编译产物 quickstart.amd64，无法校验补丁"
+            exit 1
+          fi
+          if ! strings "$BIN" | grep -q "Fallback checking feed URL"; then
+            echo "::error::编出来的二进制里没有找到你新增的日志字符串，补丁没有生效"
+            exit 1
+          fi
+          echo "已确认：network-online.go 里的 fallback 补丁已经编进这个二进制"
+
+      - name: Clone OpenWrt buildroot
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 --branch "${OWRT_BRANCH}" "${OWRT_REPO}" openwrt
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Clone upstream package feeds
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 https://github.com/linkease/nas-packages.git nas-packages
+          git clone --depth=1 https://github.com/linkease/nas-packages-luci.git nas-packages-luci
+
+      - name: Inject quickstart packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p openwrt/package/linkease
+          cp -rf nas-packages/network/services/quickstart openwrt/package/linkease/
+          cp -rf nas-packages-luci/luci/luci-app-quickstart openwrt/package/linkease/
+
+          test -f openwrt/package/linkease/quickstart/Makefile
+          test -f openwrt/package/linkease/luci-app-quickstart/Makefile
+
+      # -------------------------------------------------------------
+      # 修正点 2：PKG_HASH 不能填字面量 "skip"。OpenWrt 官方 download.mk
+      # 只认 PKG_MIRROR_HASH:=skip（且仅对 git 协议源生效），对普通
+      # tarball 下载用的 PKG_HASH 没有这种绕过机制——它会把你填的字符串
+      # 当成期望的 sha256 去比对，字面量 "skip" 必然对不上真实哈希，
+      # 要么直接报错，要么被判定为"本地文件已损坏"转而重新去 GitHub
+      # 拉官方版本，等于你的改动完全没编进去、还不报错。
+      # 正确做法：算出自己这份 tarball 的真实 sha256，填进去。
+      # -------------------------------------------------------------
+      - name: Patch quickstart package to use local tarball
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PKG_MK="openwrt/package/linkease/quickstart/Makefile"
+
+          NEW_HASH="$(sha256sum "${QS_TARBALL}" | awk '{print $1}')"
+
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${QS_VERSION}/" "$PKG_MK"
+          sed -i "s|^PKG_HASH:=.*|PKG_HASH:=${NEW_HASH}|" "$PKG_MK"
+
+          mkdir -p openwrt/dl
+          cp -f "${QS_TARBALL}" "openwrt/dl/quickstart-binary-${QS_VERSION}.tar.gz"
+
+          echo "=== patched quickstart Makefile ==="
+          grep -E '^(PKG_NAME|PKG_VERSION|PKG_SOURCE|PKG_SOURCE_URL|PKG_HASH|PKG_BUILD_DIR)' "$PKG_MK" || true
+
+          echo "=== local dl file + 真实哈希核对 ==="
+          ls -lh openwrt/dl/quickstart-binary-"${QS_VERSION}".tar.gz
+          echo "写入的 PKG_HASH: ${NEW_HASH}"
+          echo "本地文件实际 sha256: $(sha256sum openwrt/dl/quickstart-binary-"${QS_VERSION}".tar.gz | awk '{print $1}')"
+
+      # -------------------------------------------------------------
+      # 修正点 3：把厂商代表机型补回矩阵（之前这版只剩 x86_64/armsr 通用
+      # profile，砍掉了你最初点名要的 rockchip/mediatek/qualcomm/broadcom）
+      # -------------------------------------------------------------
+      - name: Generate .config
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          case "${{ github.event.inputs.target_profile }}" in
+            x86_64)
+              cat > .config <<'EOF'
+          CONFIG_TARGET_x86=y
+          CONFIG_TARGET_x86_64=y
+          CONFIG_TARGET_x86_64_DEVICE_generic=y
+          CONFIG_PACKAGE_quickstart=m
+          CONFIG_PACKAGE_luci-app-quickstart=m
+          EOF
+              ;;
+            armsr_armv8)
+              cat > .config <<'EOF'
+          CONFIG_TARGET_armsr=y
+          CONFIG_TARGET_armsr_armv8=y
+          CONFIG_TARGET_armsr_armv8_DEVICE_generic=y
+          CONFIG_PACKAGE_quickstart=m
+          CONFIG_PACKAGE_luci-app-quickstart=m
+          EOF
+              ;;
+            armsr_armv7)
+              cat > .config <<'EOF'
+          CONFIG_TARGET_armsr=y
+          CONFIG_TARGET_armsr_armv7=y
+          CONFIG_TARGET_armsr_armv7_DEVICE_generic=y
+          CONFIG_PACKAGE_quickstart=m
+          CONFIG_PACKAGE_luci-app-quickstart=m
+          EOF
+              ;;
+            rockchip_nanopi_r2s)
+              cat > .config <<'EOF'
+          CONFIG_TARGET_rockchip=y
+          CONFIG_TARGET_rockchip_armv8=y
+          CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r2s=y
+          CONFIG_PACKAGE_quickstart=m
+          CONFIG_PACKAGE_luci-app-quickstart=m
+          EOF
+              ;;
+            mediatek_filogic_redmi_ax6000)
+              cat > .config <<'EOF'
+          CONFIG_TARGET_mediatek=y
+          CONFIG_TARGET_mediatek_filogic=y
+          CONFIG_TARGET_mediatek_filogic_DEVICE_xiaomi_redmi-router-ax6000=y
+          CONFIG_PACKAGE_quickstart=m
+          CONFIG_PACKAGE_luci-app-quickstart=m
+          EOF
+              ;;
+            qualcommax_ipq807x_dl_wrx36)
+              cat > .config <<'EOF'
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq807x=y
+          CONFIG_TARGET_qualcommax_ipq807x_DEVICE_dynalink_dl-wrx36=y
+          CONFIG_PACKAGE_quickstart=m
+          CONFIG_PACKAGE_luci-app-quickstart=m
+          EOF
+              ;;
+            bcm4908_asus_gt_ac5300)
+              cat > .config <<'EOF'
+          CONFIG_TARGET_bcm4908=y
+          CONFIG_TARGET_bcm4908_generic=y
+          CONFIG_TARGET_bcm4908_generic_DEVICE_asus_gt-ac5300=y
+          CONFIG_PACKAGE_quickstart=m
+          CONFIG_PACKAGE_luci-app-quickstart=m
+          EOF
+              ;;
+            *)
+              echo "::error::unsupported target_profile"
+              exit 1
+              ;;
+          esac
+
+          echo "CONFIG_CCACHE=y" >> .config
+          make defconfig
+
+          echo "=== quickstart 相关配置 ==="
+          grep -iE 'quickstart|TARGET_armsr|TARGET_x86|TARGET_rockchip|TARGET_mediatek|TARGET_qualcommax|TARGET_bcm4908' .config || true
+
+      - name: Verify device & package selection actually took effect
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if ! grep -q "^CONFIG_PACKAGE_quickstart=m" .config; then
+            echo "::error::CONFIG_PACKAGE_quickstart=m 未生效"
+            exit 1
+          fi
+          if ! grep -q "^CONFIG_PACKAGE_luci-app-quickstart=m" .config; then
+            echo "::error::CONFIG_PACKAGE_luci-app-quickstart=m 未生效"
+            exit 1
+          fi
+          echo "包选择校验通过。"
+
+      - name: Download sources
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euxo pipefail
+          make download -j"$(nproc)" V=s
+          BAD_FILES="$(find dl -type f -size -1024c || true)"
+          if [ -n "$BAD_FILES" ]; then
+            echo "::error::以下下载文件异常过小，可能下载损坏："
+            echo "$BAD_FILES"
+            exit 1
+          fi
+
+      - name: Prepare build prerequisites
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euxo pipefail
+          make tools/install -j"$(nproc)" || make tools/install -j1 V=s
+          make toolchain/install -j"$(nproc)" || make toolchain/install -j1 V=s
+
+      - name: Build quickstart packages
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export CCACHE_DIR="$HOME/.ccache"
+          make package/linkease/quickstart/compile -j"$(nproc)" V=s || make package/linkease/quickstart/compile -j1 V=s
+          make package/linkease/luci-app-quickstart/compile -j"$(nproc)" V=s || make package/linkease/luci-app-quickstart/compile -j1 V=s
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p artifact/packages
+          find openwrt/bin/packages openwrt/bin/targets -type f \( \
+            -name "quickstart*.apk" -o \
+            -name "quickstart*.ipk" -o \
+            -name "luci-app-quickstart*.apk" -o \
+            -name "luci-app-quickstart*.ipk" \
+          \) -exec cp -f {} artifact/packages/ \;
+
+          echo "=== collected packages ==="
+          find artifact/packages -maxdepth 1 -type f | sort || true
+
+          COUNT=$(find artifact/packages -maxdepth 1 -type f | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::no packages collected"
+            exit 1
+          fi
+
+      - name: Show package file types
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for f in artifact/packages/*; do
+            echo "--- $f ---"
+            xxd -l 32 "$f" || true
+            file "$f" || true
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickstart-${{ env.QS_VERSION }}-${{ github.event.inputs.openwrt_branch }}-${{ github.event.inputs.target_profile }}
+          path: artifact/packages/
+          retention-days: 7
+          if-no-files-found: error
