@@ -374,6 +374,22 @@ jobs:
             ls -la "$d" || true
           done
 
+      # 根因修复：之前的失败不是内核目录名对不上，而是内核压根
+      # 没有被编译过。luci-app-quickstart 依赖链上会触发
+      # package/kernel/linux 的 install 阶段，需要用到内核编译产物
+      # modules.builtin，如果内核没编译，这个文件自然不存在，装包
+      # 就会报错 "cannot stat .../modules.builtin: No such file or
+      # directory"。这里显式先把内核编译出来，再编译 quickstart 包。
+      - name: Build kernel
+        working-directory: openwrt
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export CCACHE_DIR="$HOME/.ccache"
+
+          make target/linux/compile -j"$(nproc)" V=s || make target/linux/compile -j1 V=s
+
       - name: Build quickstart packages
         working-directory: openwrt
         shell: bash
