@@ -1,4 +1,4 @@
-timeflysoon (69, 私有1)                        88alt (68, 私有0)
+timeflysoon (69, 私有1)                        88alt (69, 私有1)
 -------------------------------------------  -------------------------------------
 timeflysoon/2FAGuard                         88alt/2FAGuard
 timeflysoon/3x-ui                            88alt/3x-ui
@@ -65,7 +65,7 @@ timeflysoon/weasel                           88alt/weasel
 timeflysoon/WiFiAnalyzer                     88alt/WiFiAnalyzer
 timeflysoon/WinFi                            88alt/WinFi
 timeflysoon/x-ui                             88alt/x-ui
-timeflysoon/XChrome (private)                88alt/XChrome_ch
-timeflysoon/XChrome_ch                       88alt/yahei-alarm-clock
-timeflysoon/yahei-alarm-clock                88alt/ZyPlayer
-timeflysoon/ZyPlayer
+timeflysoon/XChrome (private)                88alt/XChrome (private)
+timeflysoon/XChrome_ch                       88alt/XChrome_ch
+timeflysoon/yahei-alarm-clock                88alt/yahei-alarm-clock
+timeflysoon/ZyPlayer                         88alt/ZyPlayer
