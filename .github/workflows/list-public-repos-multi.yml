@@ -2,9 +2,10 @@ name: 列出多账户所有公开仓库(纯文本清单)
 
 # 说明:
 # 依次拉取 SYNC_USERNAMES 中每个账户下的全部公开(public)仓库,
-# 按账户先后顺序排列(同一账户内部按仓库名排序),一行一个,
-# 格式为 "账户名/仓库名",生成纯文本清单文件,提交到本仓库根目录。
-# 每次运行都是全新生成、同名覆盖,不做增量追加。
+# 第一个账户占第一列,第二个账户占第二列,以此类推,
+# 每列内部按仓库名排序,单元格格式为 "账户名/仓库名"。
+# 列宽按该列最长内容自动对齐(用空格补齐),生成等宽对齐的纯文本表格,
+# 提交到本仓库根目录。每次运行都是全新生成、同名覆盖,不做增量追加。
 # 不做任何白名单/排除名单过滤,不 clone 任何仓库,只列名单。
 
 on:
@@ -32,7 +33,7 @@ jobs:
     env:
       # ---- 要列出公开仓库的 GitHub 账户名,多个账户用空格分隔 ----
       # 按此顺序依次列出各账户的公开仓库(账户内部按仓库名排序)
-      SYNC_USERNAMES: "timeflysoon otheruser"
+      SYNC_USERNAMES: "timeflysoon 88alt wukongdaily"
 
       # ---- 生成的清单文件名(相对本仓库根目录) ----
       OUTPUT_FILE: "public_repos.txt"
@@ -49,7 +50,7 @@ jobs:
       - name: 安装 jq(用于稳定解析 GitHub API 返回的 JSON)
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: 依次拉取各账户的公开仓库列表,写入文本文件
+      - name: 依次拉取各账户的公开仓库列表(每账户一个临时文件)
         shell: bash
         env:
           GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,20 +62,20 @@ jobs:
             exit 1
           fi
 
-          # 每次运行都全新生成,先删除旧文件,做同名覆盖
-          rm -f "./$OUTPUT_FILE"
-          touch "./$OUTPUT_FILE"
+          mkdir -p /tmp/repo-cols
+          rm -f /tmp/repo-cols/*
 
           TOTAL_COUNT=0
+          IDX=0
 
           for USERNAME in $SYNC_USERNAMES; do
             [ -z "$USERNAME" ] && continue
 
             echo "=========================================="
-            echo "正在拉取账户: $USERNAME"
+            echo "正在拉取账户: $USERNAME (第 $((IDX + 1)) 列)"
             echo "=========================================="
 
-            USER_LIST_FILE=$(mktemp)
+            COL_FILE="/tmp/repo-cols/${IDX}.txt"
             PAGE=1
             while true; do
               echo "    请求第 $PAGE 页..."
@@ -92,36 +93,76 @@ jobs:
               PAGE_COUNT=$(echo "$RESPONSE" | jq 'length')
               [ "$PAGE_COUNT" -eq 0 ] && break
 
-              echo "$RESPONSE" | jq -r '.[] | .full_name' >> "$USER_LIST_FILE"
+              echo "$RESPONSE" | jq -r '.[] | .full_name' >> "$COL_FILE"
               echo "    第 $PAGE 页拿到 $PAGE_COUNT 个仓库"
 
               PAGE=$((PAGE + 1))
             done
 
-            sort -u "$USER_LIST_FILE" -o "$USER_LIST_FILE"
+            [ -f "$COL_FILE" ] || touch "$COL_FILE"
+            sort -u "$COL_FILE" -o "$COL_FILE"
 
-            USER_COUNT=$(wc -l < "$USER_LIST_FILE" | tr -d ' ')
+            USER_COUNT=$(wc -l < "$COL_FILE" | tr -d ' ')
             echo "  $USERNAME 下发现 $USER_COUNT 个公开仓库"
 
             if [ "$USER_COUNT" -eq 0 ]; then
               echo "  警告: 未获取到任何仓库,请检查该用户名是否正确、该账户下是否有公开仓库"
             fi
 
-            cat "$USER_LIST_FILE" >> "./$OUTPUT_FILE"
-            rm -f "$USER_LIST_FILE"
-
             TOTAL_COUNT=$((TOTAL_COUNT + USER_COUNT))
+            IDX=$((IDX + 1))
           done
 
           echo ""
           echo "=========================================="
-          echo "全部账户处理完成,共写入 $TOTAL_COUNT 行到 $OUTPUT_FILE"
+          echo "全部账户拉取完成,共 $TOTAL_COUNT 个仓库,准备生成对齐表格"
           echo "=========================================="
 
           if [ "$TOTAL_COUNT" -eq 0 ]; then
             echo "错误: 所有账户均未获取到任何公开仓库,终止提交"
             exit 1
           fi
+
+      - name: 按列对齐,生成等宽表格文本文件(同名覆盖)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$SYNC_USERNAMES" "$OUTPUT_FILE" << 'PYEOF'
+          import sys
+
+          usernames = sys.argv[1].split()
+          output_file = sys.argv[2]
+
+          columns = []
+          for idx in range(len(usernames)):
+              with open(f"/tmp/repo-cols/{idx}.txt", encoding="utf-8") as f:
+                  columns.append([line.rstrip("\n") for line in f if line.strip()])
+
+          # 每列宽度取"账户名列头"和该列所有仓库名里最长的那个,再留 2 格间距
+          widths = []
+          for i, u in enumerate(usernames):
+              longest = max([len(u)] + [len(x) for x in columns[i]] + [0])
+              widths.append(longest + 2)
+
+          max_rows = max((len(c) for c in columns), default=0)
+
+          lines = []
+          header = "".join(u.ljust(widths[i]) for i, u in enumerate(usernames))
+          lines.append(header.rstrip())
+          lines.append("".join(("-" * (widths[i] - 2)).ljust(widths[i]) for i in range(len(usernames))).rstrip())
+
+          for r in range(max_rows):
+              row_cells = []
+              for i in range(len(usernames)):
+                  val = columns[i][r] if r < len(columns[i]) else ""
+                  row_cells.append(val.ljust(widths[i]))
+              lines.append("".join(row_cells).rstrip())
+
+          with open(output_file, "w", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+
+          print(f"已生成对齐表格: {output_file}, 共 {len(usernames)} 列, {max_rows} 行数据")
+          PYEOF
 
       - name: 提交清单文件(同名覆盖)
         shell: bash
