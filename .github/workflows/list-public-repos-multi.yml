@@ -32,7 +32,7 @@ jobs:
     env:
       # ---- 要列出公开仓库的 GitHub 账户名,多个账户用空格分隔 ----
       # 按此顺序依次列出各账户的公开仓库(账户内部按仓库名排序)
-      SYNC_USERNAMES: "timeflysoon otheruser"
+      SYNC_USERNAMES: "timeflysoon 88alt"
 
       # ---- 生成的清单文件名(相对本仓库根目录) ----
       OUTPUT_FILE: "public_repos.txt"
