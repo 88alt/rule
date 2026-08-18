@@ -114,7 +114,8 @@ jobs:
             echo "正在处理账户: $USERNAME (第 $((IDX + 1)) 列)"
             echo "=========================================="
 
-            VARNAME="AUTH_PAT_$(echo "$USERNAME" | tr -cs '[:alnum:]' '_' | tr '[:lower:]' '[:upper:]')"
+            # 用 printf 而不是 echo,避免末尾换行符被 tr 转成多余的 "_" 导致变量名对不上
+            VARNAME="AUTH_PAT_$(printf '%s' "$USERNAME" | tr -cs '[:alnum:]' '_' | tr '[:lower:]' '[:upper:]')"
             DEDICATED_TOKEN="${!VARNAME:-}"
 
             MODE="public"
