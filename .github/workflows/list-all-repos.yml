@@ -1,56 +1,25 @@
 name: 列出多账户所有仓库(公开+私有自动识别 · 纯文本清单)
 
-# ============================================================
-# 说明
-# ============================================================
-# 依次拉取 SYNC_USERNAMES 中每个账户下的仓库,
-# 第一个账户占第一列,第二个账户占第二列,以此类推,
-# 每列内部按仓库名(即完整的 full_name 字符串)排序,
-# 单元格格式为 "账户名/仓库名",若为私有仓库则在末尾追加 " (private)"
-# (仓库名和 (private) 之间是单个空格)。
-# 列宽按该列最长内容自动对齐(用空格补齐),生成等宽对齐的纯文本表格,
-# 提交到本仓库根目录。每次运行都是全新生成、同名覆盖,不做增量追加。
-# 不做任何白名单/排除名单过滤,不 clone 任何仓库,只列名单。
+# 依次拉取 SYNC_USERNAMES 中每个账户的仓库,第一个账户占第一列,以此类推,
+# 每列内部按仓库名排序,单元格为 "账户名/仓库名",私有仓库追加 " (private)"。
+# 列宽按该列最长内容自动补齐空格对齐,生成等宽纯文本表格,提交到仓库根目录,
+# 每次全新生成、同名覆盖,不做增量追加,不 clone 任何仓库,只列名单。
 #
-# ── 私库怎么识别 ──────────────────────────────────────────────
-# 一个 classic PAT 只能代表"它所属的那一个账户"去调用 API。
-# 用它去看"别的账户"的仓库(GET /users/{username}/repos),
-# GitHub 无论如何都只会返回公开仓库 —— 这是 GitHub API 的固定行为,
-# 跟 token 权限无关,没法绕过。
-#
-# 所以本脚本要求: 每个账户必须有各自独立命名的 secret,
-# 命名规则固定为 AUTH_PAT_<账户名大写>(非字母数字字符替换成下划线),
-# 例如 timeflysoon → AUTH_PAT_TIMEFLYSOON,88alt → AUTH_PAT_88ALT。
-# 不存在"共用一个裸名 AUTH_PAT"这种写法 —— 那种写法在"一个仓库对应
-# 一个账户"的场景(比如备份/清理 workflow)里没问题,但放到"一个仓库
-# 要同时装多个账户 token"的场景里,裸名会分不清究竟是哪个账户,
-# 是长期埋雷的写法,这里明确禁止。
+# 私库识别原理: GET /users/{username}/repos 无论用什么 token 永远只返回公开仓库,
+# 这是 GitHub API 固定行为。要看私库必须用"账户本人"的 token 调用 /user/repos。
+# 因此每个账户必须有独立命名的 secret: AUTH_PAT_<账户名大写>(非字母数字转下划线),
+# 例如 timeflysoon → AUTH_PAT_TIMEFLYSOON,88alt → AUTH_PAT_88ALT,不用裸名 AUTH_PAT。
 #
 # 对每个账户:
-#   1) 找到对应的 AUTH_PAT_<账户名>,调用 GET /user 校验它的登录身份
-#      确实等于当前账户名(防止手滑填错、复制串了 token),校验通过
-#      → 进入"全量模式"(公开+私有)。
-#   2) 没配置对应 secret,或者身份对不上 → 自动降级为"仅公开仓库模式",
-#      改用 GITHUB_TOKEN,不报错、不中断,只是该账户的私库看不到。
-#
-# 迁移提示: 如果你之前是用裸名 AUTH_PAT 存 timeflysoon 的 token,
-# 请在【本仓库】(仅本仓库,不影响其他仓库)新建一个 secret
-# AUTH_PAT_TIMEFLYSOON,值直接复制原 AUTH_PAT 的内容即可;
-# 之后本仓库里的裸 AUTH_PAT 就不再被此 workflow 使用,可以按需删掉,
-# 不会影响你在其他仓库(备份/清理用)的 AUTH_PAT,因为 secret 是
-# 仓库级别隔离的,同名不同值不冲突。
-#
-# git push 权限那条不是脚本能解决的问题,提醒你自己去仓库 Settings →
-# Actions → General → Workflow permissions 确认选的是
-# "Read and write permissions",不然 YAML 里的 contents: write 也救不了。
-# ============================================================
+#   1) 存在对应 secret 且 GET /user 校验登录身份 == 账户名 → 全量模式(公开+私有)
+#   2) secret 缺失,或身份对不上 → 自动降级为仅公开仓库模式(改用 GITHUB_TOKEN),
+#      不报错、不中断整个流程,只是该账户看不到私库,并在运行日志和 Job Summary
+#      的统计表格里明确标出该账户当次是哪种模式、secret 状态如何。
 
 on:
   # schedule:
-  #   # 每天 UTC 19:00(北京时间次日 3:00)自动执行,可自行调整 cron 表达式
-  #   - cron: '0 19 * * *'
+  #   - cron: '0 19 * * *'   # 如需定时执行,取消注释并按需调整
   workflow_dispatch:
-    # 允许在 Actions 页面手动点 "Run workflow" 触发
 
 permissions:
   contents: write
@@ -64,19 +33,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # ══════════════════════════════════════════════════════════════════
-    # ██████████████████  ★★★ 需要你手动配置 ★★★  ██████████████████
-    # ══════════════════════════════════════════════════════════════════
+    # ══════════════════════════ ★ 需要你手动配置 ★ ══════════════════════════
     env:
-      # ---- 要列出仓库的 GitHub 账户名,多个账户用空格分隔 ----
-      # 按此顺序依次列出各账户的仓库(账户内部按仓库名排序)
-      SYNC_USERNAMES: "timeflysoon 88alt"
-
-      # ---- 生成的清单文件名(相对本仓库根目录) ----
-      OUTPUT_FILE: "all_repos.txt"
-    # ══════════════════════════════════════════════════════════════════
-    # ██████████████████  ★★★ 配置区到此结束 ★★★  ██████████████████
-    # ══════════════════════════════════════════════════════════════════
+      SYNC_USERNAMES: "timeflysoon 88alt"   # 要列出仓库的账户名,空格分隔,按此顺序生成列
+      OUTPUT_FILE: "all_repos.txt"          # 生成的清单文件名(相对仓库根目录)
+    # ══════════════════════════════════════════════════════════════════════
 
     steps:
       - name: 拉取本仓库
@@ -84,17 +45,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 安装 jq(用于稳定解析 GitHub API 返回的 JSON)
+      - name: 安装 jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: 依次拉取各账户的仓库列表(每账户一个临时文件,自动识别公开/私有)
+      - name: 依次拉取各账户仓库列表(自动识别公开/私有,并记录每账户统计信息)
         shell: bash
         env:
           # 每个账户各自独立的 token,命名固定为 AUTH_PAT_<账户名大写>。
-          # 新增账户时,在这里补一行同样命名规则的 env 即可,不使用裸名 AUTH_PAT。
+          # 新增账户时在这里补一行同样命名规则的 env 即可。
           AUTH_PAT_TIMEFLYSOON: ${{ secrets.AUTH_PAT_TIMEFLYSOON }}
           AUTH_PAT_88ALT: ${{ secrets.AUTH_PAT_88ALT }}
-          # 兜底公共 token,只能看公开仓库,但配额比匿名请求高很多
           PUBLIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -106,25 +66,42 @@ jobs:
 
           mkdir -p /tmp/repo-cols
           rm -f /tmp/repo-cols/*
+          STATS_FILE="/tmp/repo-cols/stats.tsv"
+          : > "$STATS_FILE"   # 每行: 账户 模式 secret状态 仓库数 私有数
 
-          # 校验某个 token 的登录身份,返回 login(失败返回空字符串,不中断脚本)
+          # 校验 token 的登录身份,返回 login(失败返回空字符串,不中断脚本)
           check_token_login() {
             local TOKEN="$1"
             [ -z "$TOKEN" ] && { echo ""; return; }
-            local CHECK
+            local CHECK HTTP_CODE
             CHECK=$(mktemp)
-            local HTTP_CODE
             HTTP_CODE=$(curl -s -o "$CHECK" -w '%{http_code}' --connect-timeout 15 --max-time 30 \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${TOKEN}" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/user" || echo "000")
-            if [ "$HTTP_CODE" = "200" ]; then
-              jq -r '.login // empty' "$CHECK" 2>/dev/null || echo ""
-            else
-              echo ""
-            fi
+            [ "$HTTP_CODE" = "200" ] && jq -r '.login // empty' "$CHECK" 2>/dev/null || echo ""
             rm -f "$CHECK"
+          }
+
+          fetch_pages() {
+            # $1=URL模板(含 {PAGE} 占位符) $2=用哪个 token $3=输出文件 $4=账户名(仅用于日志)
+            local URL_TPL="$1" TOKEN="$2" COL_FILE="$3" USERNAME="$4" PAGE=1 RESPONSE PAGE_COUNT
+            while true; do
+              RESPONSE=$(curl -fsSL --connect-timeout 15 --max-time 30 \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "${URL_TPL//\{PAGE\}/$PAGE}") || {
+                  echo "  错误: 请求账户 $USERNAME 第 $PAGE 页失败(网络超时/限速等),终止本次运行"
+                  exit 1
+                }
+              PAGE_COUNT=$(echo "$RESPONSE" | jq 'length')
+              [ "$PAGE_COUNT" -eq 0 ] && break
+              echo "$RESPONSE" | jq -r '.[] | if .private then (.full_name + " (private)") else .full_name end' >> "$COL_FILE"
+              echo "    第 $PAGE 页拿到 $PAGE_COUNT 个仓库"
+              PAGE=$((PAGE + 1))
+            done
           }
 
           TOTAL_COUNT=0
@@ -133,82 +110,40 @@ jobs:
 
           for USERNAME in $SYNC_USERNAMES; do
             [ -z "$USERNAME" ] && continue
-
             echo "=========================================="
             echo "正在处理账户: $USERNAME (第 $((IDX + 1)) 列)"
             echo "=========================================="
 
-            # ---------- 第一步: 找到这个账户专属的 token,判定模式 ----------
-            # 固定规则,不接受裸名 AUTH_PAT: AUTH_PAT_<账户名大写,非字母数字替换为下划线>
             VARNAME="AUTH_PAT_$(echo "$USERNAME" | tr -cs '[:alnum:]' '_' | tr '[:lower:]' '[:upper:]')"
             DEDICATED_TOKEN="${!VARNAME:-}"
 
             MODE="public"
-            AUTH_TOKEN=""
+            SECRET_STATUS="缺失"
 
             if [ -n "$DEDICATED_TOKEN" ]; then
               LOGIN=$(check_token_login "$DEDICATED_TOKEN")
               if [ "$LOGIN" = "$USERNAME" ]; then
                 MODE="full"
-                AUTH_TOKEN="$DEDICATED_TOKEN"
+                SECRET_STATUS="已匹配"
               else
-                echo "  警告: secret ${VARNAME} 已配置,但其登录身份(${LOGIN:-空})与账户名 ${USERNAME} 不一致,已忽略该 token"
+                SECRET_STATUS="不匹配(身份为 ${LOGIN:-空})"
+                echo "  警告: secret ${VARNAME} 已配置,但登录身份(${LOGIN:-空})与账户名 ${USERNAME} 不一致,已忽略该 token"
               fi
             else
               echo "  提示: 未找到 secret ${VARNAME},该账户将只列出公开仓库"
             fi
 
-            MODE_LABEL="仅公开仓库"
-            if [ "$MODE" = "full" ]; then
-              MODE_LABEL="公开+私有全量"
-            fi
-            echo "  本账户模式: ${MODE_LABEL}"
+            MODE_LABEL="仅公开仓库"; [ "$MODE" = "full" ] && MODE_LABEL="公开+私有全量"
+            echo "  本账户模式: ${MODE_LABEL}(secret 状态: ${SECRET_STATUS})"
 
             COL_FILE="/tmp/repo-cols/${IDX}.txt"
-            PAGE=1
 
             if [ "$MODE" = "full" ]; then
-              # 全量模式: 用本人 token 拉取自己名下所有仓库(含私有)
-              while true; do
-                echo "    请求第 $PAGE 页(全量)..."
-                RESPONSE=$(curl -fsSL --connect-timeout 15 --max-time 30 \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer ${AUTH_TOKEN}" \
-                  -H "X-GitHub-Api-Version: 2022-11-28" \
-                  "https://api.github.com/user/repos?per_page=100&page=${PAGE}&visibility=all&affiliation=owner") || {
-                    echo "  错误: 请求账户 $USERNAME 第 $PAGE 页失败(网络超时/限速等),终止本次运行"
-                    exit 1
-                  }
-
-                PAGE_COUNT=$(echo "$RESPONSE" | jq 'length')
-                [ "$PAGE_COUNT" -eq 0 ] && break
-
-                echo "$RESPONSE" | jq -r '.[] | if .private then (.full_name + " (private)") else .full_name end' >> "$COL_FILE"
-                echo "    第 $PAGE 页拿到 $PAGE_COUNT 个仓库"
-
-                PAGE=$((PAGE + 1))
-              done
+              fetch_pages "https://api.github.com/user/repos?per_page=100&page={PAGE}&visibility=all&affiliation=owner" \
+                "$DEDICATED_TOKEN" "$COL_FILE" "$USERNAME"
             else
-              # 仅公开模式: 该接口对"非本人"永远只返回公开仓库,与 token 无关
-              while true; do
-                echo "    请求第 $PAGE 页(仅公开)..."
-                RESPONSE=$(curl -fsSL --connect-timeout 15 --max-time 30 \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer ${PUBLIC_TOKEN}" \
-                  -H "X-GitHub-Api-Version: 2022-11-28" \
-                  "https://api.github.com/users/${USERNAME}/repos?per_page=100&page=${PAGE}&type=owner") || {
-                    echo "  错误: 请求账户 $USERNAME 第 $PAGE 页失败(网络超时/404/限速等),终止本次运行"
-                    exit 1
-                  }
-
-                PAGE_COUNT=$(echo "$RESPONSE" | jq 'length')
-                [ "$PAGE_COUNT" -eq 0 ] && break
-
-                echo "$RESPONSE" | jq -r '.[] | if .private then (.full_name + " (private)") else .full_name end' >> "$COL_FILE"
-                echo "    第 $PAGE 页拿到 $PAGE_COUNT 个仓库"
-
-                PAGE=$((PAGE + 1))
-              done
+              fetch_pages "https://api.github.com/users/${USERNAME}/repos?per_page=100&page={PAGE}&type=owner" \
+                "$PUBLIC_TOKEN" "$COL_FILE" "$USERNAME"
             fi
 
             [ -f "$COL_FILE" ] || touch "$COL_FILE"
@@ -216,22 +151,22 @@ jobs:
 
             USER_COUNT=$(wc -l < "$COL_FILE" | tr -d ' ')
             USER_PRIVATE=$(grep -c ' (private)$' "$COL_FILE" || true)
-
             echo "  $USERNAME 下发现 $USER_COUNT 个仓库(其中私有 $USER_PRIVATE 个)"
+            [ "$USER_COUNT" -eq 0 ] && echo "  警告: 未获取到任何仓库,请检查用户名是否正确"
 
-            if [ "$USER_COUNT" -eq 0 ]; then
-              echo "  警告: 未获取到任何仓库,请检查该用户名是否正确、该账户下是否有仓库"
-            fi
+            printf '%s\t%s\t%s\t%s\t%s\n' "$USERNAME" "$MODE_LABEL" "$SECRET_STATUS" "$USER_COUNT" "$USER_PRIVATE" >> "$STATS_FILE"
 
             TOTAL_COUNT=$((TOTAL_COUNT + USER_COUNT))
             TOTAL_PRIVATE=$((TOTAL_PRIVATE + USER_PRIVATE))
             IDX=$((IDX + 1))
           done
 
+          echo "TOTAL_COUNT=$TOTAL_COUNT" >> "$GITHUB_ENV"
+          echo "TOTAL_PRIVATE=$TOTAL_PRIVATE" >> "$GITHUB_ENV"
+          echo "ACCOUNT_COUNT=$IDX" >> "$GITHUB_ENV"
+
           echo ""
-          echo "=========================================="
-          echo "全部账户处理完成,共 $TOTAL_COUNT 个仓库(私有 $TOTAL_PRIVATE 个),准备生成对齐表格"
-          echo "=========================================="
+          echo "全部账户处理完成,共 $TOTAL_COUNT 个仓库(私有 $TOTAL_PRIVATE 个)"
 
           if [ "$TOTAL_COUNT" -eq 0 ]; then
             echo "错误: 所有账户均未获取到任何仓库,终止提交"
@@ -243,8 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "$SYNC_USERNAMES" "$OUTPUT_FILE" << 'PYEOF'
-          import sys
-          import os
+          import sys, os
 
           usernames = sys.argv[1].split()
           output_file = sys.argv[2]
@@ -254,57 +188,76 @@ jobs:
               with open(f"/tmp/repo-cols/{idx}.txt", encoding="utf-8") as f:
                   columns.append([line.rstrip("\n") for line in f if line.strip()])
 
-          # 表头显示: 账户名 (总数, 私有数)
           def make_header(u, col):
               private_n = sum(1 for x in col if x.endswith(" (private)"))
               return f"{u} ({len(col)}, 私有{private_n})"
 
           headers = [make_header(u, columns[i]) for i, u in enumerate(usernames)]
-
-          # 每列宽度取表头和该列所有仓库名里最长的那个,再留 2 格间距
-          widths = []
-          for i, h in enumerate(headers):
-              longest = max([len(h)] + [len(x) for x in columns[i]] + [0])
-              widths.append(longest + 2)
-
+          widths = [max([len(headers[i])] + [len(x) for x in columns[i]] + [0]) + 2 for i in range(len(usernames))]
           max_rows = max((len(c) for c in columns), default=0)
 
-          lines = []
-          header = "".join(headers[i].ljust(widths[i]) for i in range(len(usernames)))
-          lines.append(header.rstrip())
+          lines = ["".join(headers[i].ljust(widths[i]) for i in range(len(usernames))).rstrip()]
           lines.append("".join(("-" * (widths[i] - 2)).ljust(widths[i]) for i in range(len(usernames))).rstrip())
-
           for r in range(max_rows):
-              row_cells = []
-              for i in range(len(usernames)):
-                  val = columns[i][r] if r < len(columns[i]) else ""
-                  row_cells.append(val.ljust(widths[i]))
-              lines.append("".join(row_cells).rstrip())
+              row = [(columns[i][r] if r < len(columns[i]) else "").ljust(widths[i]) for i in range(len(usernames))]
+              lines.append("".join(row).rstrip())
 
           with open(output_file + ".tmp", "w", encoding="utf-8") as f:
               f.write("\n".join(lines) + "\n")
-
-          # 原子替换: 先写临时文件再整体改名,避免中途失败留下半截的输出文件
           os.replace(output_file + ".tmp", output_file)
-
           print(f"已生成对齐表格: {output_file}, 共 {len(usernames)} 列, {max_rows} 行数据")
           PYEOF
 
       - name: 提交清单文件(同名覆盖)
+        id: commit
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add -f "./$OUTPUT_FILE"
 
           if git diff --staged --quiet; then
             echo "没有变化,无需提交"
+            echo "committed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           git commit -m "更新仓库清单(多账户·公开+私有) $(date -u '+%Y-%m-%d %H:%M UTC')"
-
           git pull --rebase
           git push
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+
+      - name: 生成 Job Summary 报告
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## 📋 仓库清单更新报告"
+            echo ""
+            echo "**更新时间:** $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S') (北京时间)"
+            echo "**触发方式:** ${{ github.event_name }}"
+            echo "**输出文件:** \`${OUTPUT_FILE}\`"
+            echo "**目标账户数:** ${ACCOUNT_COUNT:-0}"
+            echo ""
+            echo "**状态:** ✅ 更新任务执行完成"
+            echo ""
+            echo "### 📊 各账户统计"
+            echo ""
+            echo "| 账户 | 模式 | Secret 状态 | 仓库数 | 私有数 |"
+            echo "|---|---|---|---|---|"
+            if [ -f /tmp/repo-cols/stats.tsv ]; then
+              while IFS=$'\t' read -r ACC MODE STATUS CNT PRIV; do
+                echo "| ${ACC} | ${MODE} | ${STATUS} | ${CNT} | ${PRIV} |"
+              done < /tmp/repo-cols/stats.tsv
+            fi
+            echo "| **总计** |  |  | **${TOTAL_COUNT:-0}** | **${TOTAL_PRIVATE:-0}** |"
+            echo ""
+            if [ "${{ steps.commit.outputs.committed }}" = "true" ]; then
+              echo "🔄 **提交结果:** 清单有变化,已提交并推送到仓库"
+            else
+              echo "⏭️ **提交结果:** 内容与上次一致,无需提交"
+            fi
+            echo ""
+            echo "> 当前仅通过 \`workflow_dispatch\` 手动触发,定时执行(cron)已在文件中注释关闭,如需启用请自行取消注释。"
+          } >> "$GITHUB_STEP_SUMMARY"
