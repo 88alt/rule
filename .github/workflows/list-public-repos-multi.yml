@@ -33,7 +33,7 @@ jobs:
     env:
       # ---- 要列出公开仓库的 GitHub 账户名,多个账户用空格分隔 ----
       # 按此顺序依次列出各账户的公开仓库(账户内部按仓库名排序)
-      SYNC_USERNAMES: "timeflysoon 88alt wukongdaily"
+      SYNC_USERNAMES: "timeflysoon 88alt wukongdaily otheruser"
 
       # ---- 生成的清单文件名(相对本仓库根目录) ----
       OUTPUT_FILE: "public_repos.txt"
@@ -100,7 +100,7 @@ jobs:
             done
 
             [ -f "$COL_FILE" ] || touch "$COL_FILE"
-            sort -u "$COL_FILE" -o "$COL_FILE"
+            LC_ALL=C sort -u "$COL_FILE" -o "$COL_FILE"
 
             USER_COUNT=$(wc -l < "$COL_FILE" | tr -d ' ')
             echo "  $USERNAME 下发现 $USER_COUNT 个公开仓库"
@@ -129,6 +129,7 @@ jobs:
           set -euo pipefail
           python3 - "$SYNC_USERNAMES" "$OUTPUT_FILE" << 'PYEOF'
           import sys
+          import os
 
           usernames = sys.argv[1].split()
           output_file = sys.argv[2]
@@ -159,8 +160,11 @@ jobs:
                   row_cells.append(val.ljust(widths[i]))
               lines.append("".join(row_cells).rstrip())
 
-          with open(output_file, "w", encoding="utf-8") as f:
+          with open(output_file + ".tmp", "w", encoding="utf-8") as f:
               f.write("\n".join(lines) + "\n")
+
+          # 原子替换: 先写临时文件再整体改名,避免中途失败留下半截的输出文件
+          os.replace(output_file + ".tmp", output_file)
 
           print(f"已生成对齐表格: {output_file}, 共 {len(usernames)} 列, {max_rows} 行数据")
           PYEOF
