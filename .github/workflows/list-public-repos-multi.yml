@@ -7,6 +7,10 @@ name: 列出多账户所有公开仓库(纯文本清单)
 # 列宽按该列最长内容自动对齐(用空格补齐),生成等宽对齐的纯文本表格,
 # 提交到本仓库根目录。每次运行都是全新生成、同名覆盖,不做增量追加。
 # 不做任何白名单/排除名单过滤,不 clone 任何仓库,只列名单。
+#
+# git push 权限那条不是脚本能解决的问题,提醒你自己去仓库 Settings →
+# Actions → General → Workflow permissions 确认选的是
+# "Read and write permissions",不然 YAML 里的 contents: write 也救不了。
 
 on:
   # schedule:
