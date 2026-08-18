@@ -1,8 +1,10 @@
-name: 列出用户所有公开仓库(纯文本清单)
+name: 列出多账户所有公开仓库(纯文本清单)
 
 # 说明:
-# 拉取 SYNC_USERNAME 指定账户下的全部公开(public)仓库,
-# 一行一个,生成纯文本清单文件,提交到本仓库(.yml 所在仓库)根目录。
+# 依次拉取 SYNC_USERNAMES 中每个账户下的全部公开(public)仓库,
+# 按账户先后顺序排列(同一账户内部按仓库名排序),一行一个,
+# 格式为 "账户名/仓库名",生成纯文本清单文件,提交到本仓库根目录。
+# 每次运行都是全新生成、同名覆盖,不做增量追加。
 # 不做任何白名单/排除名单过滤,不 clone 任何仓库,只列名单。
 
 on:
@@ -28,8 +30,9 @@ jobs:
     # ██████████████████  ★★★ 需要你手动配置 ★★★  ██████████████████
     # ══════════════════════════════════════════════════════════════════
     env:
-      # ---- 要列出公开仓库的 GitHub 账户名 ----
-      SYNC_USERNAME: "timeflysoon"
+      # ---- 要列出公开仓库的 GitHub 账户名,多个账户用空格分隔 ----
+      # 按此顺序依次列出各账户的公开仓库(账户内部按仓库名排序)
+      SYNC_USERNAMES: "timeflysoon 88alt"
 
       # ---- 生成的清单文件名(相对本仓库根目录) ----
       OUTPUT_FILE: "public_repos.txt"
@@ -46,50 +49,74 @@ jobs:
       - name: 安装 jq(用于稳定解析 GitHub API 返回的 JSON)
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: 拉取远程公开仓库列表,写入文本文件
+      - name: 依次拉取各账户的公开仓库列表,写入文本文件
         shell: bash
         env:
           GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          USERNAME="$SYNC_USERNAME"
-          if [ -z "$USERNAME" ] || [ "$USERNAME" = "你的GitHub用户名" ]; then
-            echo "错误: 请先在 yml 顶部 env.SYNC_USERNAME 填写真实用户名"
+          if [ -z "${SYNC_USERNAMES// }" ]; then
+            echo "错误: 请先在 yml 顶部 env.SYNC_USERNAMES 填写至少一个真实用户名"
             exit 1
           fi
 
-          REMOTE_LIST_FILE=$(mktemp)
-          PAGE=1
-          while true; do
-            RESPONSE=$(curl -fsSL \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${GH_API_TOKEN}" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/users/${USERNAME}/repos?per_page=100&page=${PAGE}&type=public")
+          # 每次运行都全新生成,先删除旧文件,做同名覆盖
+          rm -f "./$OUTPUT_FILE"
+          touch "./$OUTPUT_FILE"
 
-            PAGE_COUNT=$(echo "$RESPONSE" | jq 'length')
-            [ "$PAGE_COUNT" -eq 0 ] && break
+          TOTAL_COUNT=0
 
-            echo "$RESPONSE" | jq -r '.[] | .full_name' >> "$REMOTE_LIST_FILE"
+          for USERNAME in $SYNC_USERNAMES; do
+            [ -z "$USERNAME" ] && continue
 
-            PAGE=$((PAGE + 1))
+            echo "=========================================="
+            echo "正在拉取账户: $USERNAME"
+            echo "=========================================="
+
+            USER_LIST_FILE=$(mktemp)
+            PAGE=1
+            while true; do
+              RESPONSE=$(curl -fsSL \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GH_API_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/users/${USERNAME}/repos?per_page=100&page=${PAGE}&type=public")
+
+              PAGE_COUNT=$(echo "$RESPONSE" | jq 'length')
+              [ "$PAGE_COUNT" -eq 0 ] && break
+
+              echo "$RESPONSE" | jq -r '.[] | .full_name' >> "$USER_LIST_FILE"
+
+              PAGE=$((PAGE + 1))
+            done
+
+            sort -u "$USER_LIST_FILE" -o "$USER_LIST_FILE"
+
+            USER_COUNT=$(wc -l < "$USER_LIST_FILE" | tr -d ' ')
+            echo "  $USERNAME 下发现 $USER_COUNT 个公开仓库"
+
+            if [ "$USER_COUNT" -eq 0 ]; then
+              echo "  警告: 未获取到任何仓库,请检查该用户名是否正确、该账户下是否有公开仓库"
+            fi
+
+            cat "$USER_LIST_FILE" >> "./$OUTPUT_FILE"
+            rm -f "$USER_LIST_FILE"
+
+            TOTAL_COUNT=$((TOTAL_COUNT + USER_COUNT))
           done
 
-          sort -u "$REMOTE_LIST_FILE" -o "$REMOTE_LIST_FILE"
+          echo ""
+          echo "=========================================="
+          echo "全部账户处理完成,共写入 $TOTAL_COUNT 行到 $OUTPUT_FILE"
+          echo "=========================================="
 
-          REMOTE_COUNT=$(wc -l < "$REMOTE_LIST_FILE" | tr -d ' ')
-          echo "远程共发现 $REMOTE_COUNT 个公开仓库"
-
-          if [ "$REMOTE_COUNT" -eq 0 ]; then
-            echo "未获取到任何仓库,请检查 SYNC_USERNAME 是否正确、该账户下是否有公开仓库"
+          if [ "$TOTAL_COUNT" -eq 0 ]; then
+            echo "错误: 所有账户均未获取到任何公开仓库,终止提交"
             exit 1
           fi
 
-          mv "$REMOTE_LIST_FILE" "./$OUTPUT_FILE"
-          echo "已写入 $OUTPUT_FILE,共 $REMOTE_COUNT 行"
-
-      - name: 提交清单文件
+      - name: 提交清单文件(同名覆盖)
         shell: bash
         run: |
           set -euo pipefail
@@ -103,7 +130,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "更新公开仓库清单 $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git commit -m "更新公开仓库清单(多账户) $(date -u '+%Y-%m-%d %H:%M UTC')"
 
           git pull --rebase
           git push
