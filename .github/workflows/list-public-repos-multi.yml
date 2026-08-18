@@ -138,16 +138,17 @@ jobs:
               with open(f"/tmp/repo-cols/{idx}.txt", encoding="utf-8") as f:
                   columns.append([line.rstrip("\n") for line in f if line.strip()])
 
-          # 每列宽度取"账户名列头"和该列所有仓库名里最长的那个,再留 2 格间距
+          # 每列宽度取"账户名+仓库数表头"和该列所有仓库名里最长的那个,再留 2 格间距
+          headers = [f"{u} ({len(columns[i])})" for i, u in enumerate(usernames)]
           widths = []
-          for i, u in enumerate(usernames):
-              longest = max([len(u)] + [len(x) for x in columns[i]] + [0])
+          for i, h in enumerate(headers):
+              longest = max([len(h)] + [len(x) for x in columns[i]] + [0])
               widths.append(longest + 2)
 
           max_rows = max((len(c) for c in columns), default=0)
 
           lines = []
-          header = "".join(u.ljust(widths[i]) for i, u in enumerate(usernames))
+          header = "".join(headers[i].ljust(widths[i]) for i in range(len(usernames)))
           lines.append(header.rstrip())
           lines.append("".join(("-" * (widths[i] - 2)).ljust(widths[i]) for i in range(len(usernames))).rstrip())
 
