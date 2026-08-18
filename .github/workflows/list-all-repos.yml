@@ -147,7 +147,8 @@ jobs:
             fi
 
             [ -f "$COL_FILE" ] || touch "$COL_FILE"
-            LC_ALL=C sort -u "$COL_FILE" -o "$COL_FILE"
+            # -f: 大小写不敏感排序(自然字母序),避免大写字母因 ASCII 值靠前而排到最前面
+            LC_ALL=C sort -fu "$COL_FILE" -o "$COL_FILE"
 
             USER_COUNT=$(wc -l < "$COL_FILE" | tr -d ' ')
             USER_PRIVATE=$(grep -c ' (private)$' "$COL_FILE" || true)
