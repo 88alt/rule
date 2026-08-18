@@ -1,68 +1,70 @@
-timeflysoon/2FAGuard
-timeflysoon/3x-ui
-timeflysoon/Actions-FriendlyWrt
-timeflysoon/Are-u-ok
-timeflysoon/BaiduPCS-Go
-timeflysoon/CLX-S20P
-timeflysoon/ClashMetaForAndroid
-timeflysoon/CloudRunFilesBuilder
-timeflysoon/CloudSaver
-timeflysoon/Cloudflare-Navihive
-timeflysoon/Cloudflare-vless-trojan
-timeflysoon/CloudflareSpeedTest
-timeflysoon/GenP
-timeflysoon/ImmortalWrt-ImageBuilder
-timeflysoon/ImmortalWrt-ImageBuilder_x86-64
-timeflysoon/LAVFilters
-timeflysoon/Microsoft-Activation-Scripts
-timeflysoon/MikroTikPatch
-timeflysoon/MusicFree
-timeflysoon/Nrfr
-timeflysoon/OpenBackRestore
-timeflysoon/OpenClash
-timeflysoon/OpenWrtAction
-timeflysoon/PVE-manager-status
-timeflysoon/SSL-Renewal
-timeflysoon/Sms
-timeflysoon/WiFiAnalyzer
-timeflysoon/WinFi
-timeflysoon/XChrome_ch
-timeflysoon/ZyPlayer
-timeflysoon/apk
-timeflysoon/apk-extra
-timeflysoon/clash-rules
-timeflysoon/commonscript
-timeflysoon/dae
-timeflysoon/daed
-timeflysoon/ecs
-timeflysoon/edgetunnel
-timeflysoon/github-chinese
-timeflysoon/gl-inet-onescript
-timeflysoon/gopeed
-timeflysoon/img-installer
-timeflysoon/immortalwrt
-timeflysoon/iptv
-timeflysoon/luci-app-daed-runfiles
-timeflysoon/luci-app-run
-timeflysoon/meta-rules-dat
-timeflysoon/nanopi-openwrt
-timeflysoon/openclash-auto-installer
-timeflysoon/openwrt-daede
-timeflysoon/quickstart
-timeflysoon/realtek-r8125-dkms
-timeflysoon/realtek-r8125-dkms_ch
-timeflysoon/rule
-timeflysoon/sdmaid-se
-timeflysoon/small
-timeflysoon/store
-timeflysoon/store-extra
-timeflysoon/stratumauth_app
-timeflysoon/sublink-worker
-timeflysoon/temp
-timeflysoon/turboacc
-timeflysoon/v2rayN
-timeflysoon/v2rayNG
-timeflysoon/v2rayfree
-timeflysoon/weasel
-timeflysoon/x-ui
-timeflysoon/yahei-alarm-clock
+timeflysoon                                  88alt                                  wukongdaily
+-------------------------------------------  -------------------------------------  ------------------------------------
+timeflysoon/2FAGuard                         88alt/2FAGuard                         wukongdaily/ActionDemo
+timeflysoon/3x-ui                            88alt/3x-ui                            wukongdaily/AutoBuild-immortalwrt
+timeflysoon/Actions-FriendlyWrt              88alt/Actions-FriendlyWrt              wukongdaily/DockerTarBuilder
+timeflysoon/Are-u-ok                         88alt/Are-u-ok                         wukongdaily/HowToUseSSH
+timeflysoon/BaiduPCS-Go                      88alt/BaiduPCS-Go                      wukongdaily/ImmortalWrt-ImageBuilder
+timeflysoon/CLX-S20P                         88alt/CLX-S20P                         wukongdaily/Kwrt
+timeflysoon/ClashMetaForAndroid              88alt/ClashMetaForAndroid              wukongdaily/MakeRunFile
+timeflysoon/CloudRunFilesBuilder             88alt/CloudRunFilesBuilder             wukongdaily/OneKVM
+timeflysoon/CloudSaver                       88alt/CloudSaver                       wukongdaily/OpenBackRestore
+timeflysoon/Cloudflare-Navihive              88alt/Cloudflare-Navihive              wukongdaily/OrangePiShell
+timeflysoon/Cloudflare-vless-trojan          88alt/Cloudflare-vless-trojan          wukongdaily/RunFilesBuilder
+timeflysoon/CloudflareSpeedTest              88alt/CloudflareSpeedTest              wukongdaily/Sink
+timeflysoon/GenP                             88alt/GenP                             wukongdaily/allinonescript
+timeflysoon/ImmortalWrt-ImageBuilder         88alt/ImmortalWrt-ImageBuilder         wukongdaily/amlogic-s9xxx-openwrt
+timeflysoon/ImmortalWrt-ImageBuilder_x86-64  88alt/ImmortalWrt-ImageBuilder_x86-64  wukongdaily/apk
+timeflysoon/LAVFilters                       88alt/LAVFilters                       wukongdaily/be3600
+timeflysoon/Microsoft-Activation-Scripts     88alt/Microsoft-Activation-Scripts     wukongdaily/build-openwrt
+timeflysoon/MikroTikPatch                    88alt/MikroTikPatch                    wukongdaily/commonscript
+timeflysoon/MusicFree                        88alt/MusicFree                        wukongdaily/diy-nas-onescript
+timeflysoon/Nrfr                             88alt/Nrfr                             wukongdaily/flippy-openwrt-actions
+timeflysoon/OpenBackRestore                  88alt/OpenBackRestore                  wukongdaily/getinfo
+timeflysoon/OpenClash                        88alt/OpenClash                        wukongdaily/gl-inet-onescript
+timeflysoon/OpenWrtAction                    88alt/OpenWrtAction                    wukongdaily/iStoreNAS
+timeflysoon/PVE-manager-status               88alt/PVE-manager-status               wukongdaily/ib-overlay
+timeflysoon/SSL-Renewal                      88alt/SSL-Renewal                      wukongdaily/img-installer
+timeflysoon/Sms                              88alt/Sms                              wukongdaily/immdocker
+timeflysoon/WiFiAnalyzer                     88alt/WiFiAnalyzer                     wukongdaily/immtest
+timeflysoon/WinFi                            88alt/WinFi                            wukongdaily/index
+timeflysoon/XChrome_ch                       88alt/XChrome_ch                       wukongdaily/istoreos-actions
+timeflysoon/ZyPlayer                         88alt/ZyPlayer                         wukongdaily/istoreos-builder
+timeflysoon/apk                              88alt/apk                              wukongdaily/istoreos-docker-builder
+timeflysoon/apk-extra                        88alt/apk-extra                        wukongdaily/istoreos-mt3000-script
+timeflysoon/clash-rules                      88alt/clash-rules                      wukongdaily/istoreos-third
+timeflysoon/commonscript                     88alt/commonscript                     wukongdaily/lede
+timeflysoon/dae                              88alt/dae                              wukongdaily/luci-app-easymesh
+timeflysoon/daed                             88alt/daed                             wukongdaily/luci-app-online-upgrade
+timeflysoon/ecs                              88alt/ecs                              wukongdaily/luci-app-partexp
+timeflysoon/edgetunnel                       88alt/edgetunnel                       wukongdaily/luci-app-run
+timeflysoon/github-chinese                   88alt/github-chinese                   wukongdaily/mt3000
+timeflysoon/gl-inet-onescript                88alt/gl-inet-onescript                wukongdaily/multipass
+timeflysoon/gopeed                           88alt/gopeed                           wukongdaily/openwrt-app-actions
+timeflysoon/img-installer                    88alt/img-installer                    wukongdaily/openwrt_packit
+timeflysoon/immortalwrt                      88alt/immortalwrt                      wukongdaily/pan
+timeflysoon/iptv                             88alt/iptv                             wukongdaily/qcow2
+timeflysoon/luci-app-daed-runfiles           88alt/luci-app-daed-runfiles           wukongdaily/quickstart
+timeflysoon/luci-app-run                     88alt/luci-app-run                     wukongdaily/store
+timeflysoon/meta-rules-dat                   88alt/meta-rules-dat                   wukongdaily/tempshell
+timeflysoon/nanopi-openwrt                   88alt/nanopi-openwrt                   wukongdaily/tvhelper
+timeflysoon/openclash-auto-installer         88alt/openclash-auto-installer         wukongdaily/tvhelper-docker
+timeflysoon/openwrt-daede                    88alt/openwrt-daede                    wukongdaily/urlclash-converter
+timeflysoon/quickstart                       88alt/quickstart                       wukongdaily/wklife
+timeflysoon/realtek-r8125-dkms               88alt/realtek-r8125-dkms               wukongdaily/wukongdaily
+timeflysoon/realtek-r8125-dkms_ch            88alt/realtek-r8125-dkms_ch
+timeflysoon/rule                             88alt/rule
+timeflysoon/sdmaid-se                        88alt/sdmaid-se
+timeflysoon/small                            88alt/small
+timeflysoon/store                            88alt/store
+timeflysoon/store-extra                      88alt/store-extra
+timeflysoon/stratumauth_app                  88alt/stratumauth_app
+timeflysoon/sublink-worker                   88alt/sublink-worker
+timeflysoon/temp                             88alt/temp
+timeflysoon/turboacc                         88alt/turboacc
+timeflysoon/v2rayN                           88alt/v2rayN
+timeflysoon/v2rayNG                          88alt/v2rayNG
+timeflysoon/v2rayfree                        88alt/v2rayfree
+timeflysoon/weasel                           88alt/weasel
+timeflysoon/x-ui                             88alt/x-ui
+timeflysoon/yahei-alarm-clock                88alt/yahei-alarm-clock
