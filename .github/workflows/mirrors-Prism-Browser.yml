@@ -17,22 +17,22 @@ permissions:
 # 🔧 配置区：修改源仓库和目标仓库
 # ============================================================
 env:
-  SOURCE_REPO: "https://github.com/timeflysoon/Prism-Browser-Free.git"
+  SOURCE_REPO: "git@github-timeflysoon:timeflysoon/Prism-Browser-Free.git"
   SOURCE_REPO_NAME: "Prism-Browser-Free"
   TARGET_REPOS: >-
     git@github-88alt:88alt/Prism-Browser-Free.git
     git@github-88top:88top/Prism-Browser-Free.git
     git@github-88sys:88sys/Prism-Browser-Free.git
   SSH_HOSTS: >-
+    github-timeflysoon:SSH_PRIVATE_KEY_TIMEFLYSOON
     github-88alt:SSH_PRIVATE_KEY_88ALT
     github-88top:SSH_PRIVATE_KEY_88TOP
     github-88sys:SSH_PRIVATE_KEY_88SYS
 # ============================================================
-# 说明：
-# 1. 本 workflow 运行在 timeflysoon/Prism-Browser-Free 仓库自身，源仓库是私库，
-#    克隆时用当前 job 自带的 GITHUB_TOKEN 认证（见步骤4），不需要额外的 PAT。
-# 2. SSH_PRIVATE_KEY_TIMEFLYSOON 这个 Secret 本文件未使用；如果以后需要把本仓库
-#    也当作某个镜像目标反向推送，再把它加入 SSH_HOSTS / TARGET_REPOS 即可。
+# 说明：本 workflow 运行在 timeflysoon/rule 仓库下，与源仓库
+# timeflysoon/Prism-Browser-Free 是两个不同仓库，默认 GITHUB_TOKEN
+# 无权跨仓库访问私库，因此源仓库也必须走专用 SSH 部署密钥克隆，
+# 与三个镜像目标使用完全相同的机制。
 # ============================================================
 
 jobs:
@@ -54,6 +54,7 @@ jobs:
 
       - name: 2. 设置SSH密钥对
         env:
+          SSH_PRIVATE_KEY_TIMEFLYSOON: ${{ secrets.SSH_PRIVATE_KEY_TIMEFLYSOON }}
           SSH_PRIVATE_KEY_88ALT: ${{ secrets.SSH_PRIVATE_KEY_88ALT }}
           SSH_PRIVATE_KEY_88TOP: ${{ secrets.SSH_PRIVATE_KEY_88TOP }}
           SSH_PRIVATE_KEY_88SYS: ${{ secrets.SSH_PRIVATE_KEY_88SYS }}
@@ -92,17 +93,10 @@ jobs:
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
           git config --global init.defaultBranch main
-          # ubuntu-latest 系统级 /etc/gitconfig 默认把 github.com 的凭据托管给 gh CLI，
-          # 未登录时会卡在读用户名上；这里显式清空覆盖掉，避免和步骤4的 token 认证冲突
-          git config --global credential.https://github.com.helper ""
-          git config --global --add credential.https://github.com.helper ""
           echo "✅ Git配置完成"
 
       - name: 4. 克隆源仓库并执行镜像同步
         id: sync_step
-        env:
-          GIT_TERMINAL_PROMPT: "0"
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 通用重试函数：retry <最大次数> <间隔秒数> <要执行的命令...>
           retry() {
@@ -123,12 +117,9 @@ jobs:
           echo "=== 克隆源仓库: $SOURCE_REPO ==="
           REPO_DIR="${SOURCE_REPO_NAME}.git"
           CLONE_START=$(date +%s)
-          # 源仓库是私库，用当前 workflow 自带的 GITHUB_TOKEN 拼成带认证的克隆地址；
-          # 该 token 仅对本仓库有效、随 job 结束自动失效，不需要额外建 PAT
-          AUTH_SOURCE_REPO="https://x-access-token:${GH_TOKEN}@github.com/timeflysoon/Prism-Browser-Free.git"
 
           rm -rf "$REPO_DIR" 2>/dev/null || true
-          if ! retry 3 10 git clone --mirror "$AUTH_SOURCE_REPO" "$REPO_DIR"; then
+          if ! retry 3 10 git clone --mirror "$SOURCE_REPO" "$REPO_DIR"; then
             echo "❌ 克隆失败（已达最大重试次数）"
             exit 1
           fi
