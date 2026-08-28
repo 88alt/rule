@@ -1,4 +1,4 @@
-name: Sync Mirror Repositories
+name: Sync Mirror Repositories (meta-rules-dat)
 
 on:
   schedule:
