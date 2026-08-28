@@ -1,9 +1,9 @@
 name: Sync Mirror Repositories (Prism-Browser-Free)
 
 on:
-  schedule:
-    # 北京时间 07:20 (UTC 前一日 23:20) 和 19:20 (UTC 11:20)
-    - cron: '20 11,23 * * *'
+  # schedule:
+  #   # 北京时间 07:20 (UTC 前一日 23:20) 和 19:20 (UTC 11:20)
+  #   - cron: '20 11,23 * * *'
   workflow_dispatch:
 
 concurrency:
